@@ -4,6 +4,8 @@ defmodule Mix.Tasks.Defdo.Repo.CompiledConfig do
   """
   @shortdoc "Generates a flavour compiled config file"
 
+  use Mix.Task
+
   def run(args) do
     valid_options = [filename: :string]
 
