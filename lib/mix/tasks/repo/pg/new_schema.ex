@@ -71,8 +71,18 @@ defmodule Mix.Tasks.Defdo.Repo.Pg.NewSchema do
   end
 
   defp get_config(repo, opts) when is_atom(repo) do
-    otp_app = opts[:otp_app] || otp_app()
-    Application.get_env(safe_atom(otp_app), repo)
+    otp_app = (opts[:otp_app] || otp_app()) |> safe_atom()
+
+    if opts[:debug] do
+      Logger.debug([
+        "The otp_app ",
+        inspect(otp_app),
+        " and the repo ",
+        inspect(repo)
+      ])
+    end
+
+    Application.get_env(otp_app, repo)
   end
 
   def otp_app do
