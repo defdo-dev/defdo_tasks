@@ -6,6 +6,7 @@ defmodule Mix.Tasks.Defdo.Repo.CompiledConfig do
 
   def run(args) do
     valid_options = [filename: :string]
+
     case OptionParser.parse_head!(args, switches: valid_options) do
       {opts, []} ->
         new(opts[:filename])
@@ -15,8 +16,7 @@ defmodule Mix.Tasks.Defdo.Repo.CompiledConfig do
     end
   end
 
-  def new(nil), do:
-    new("defdo_compiled_config.exs")
+  def new(nil), do: new("defdo_compiled_config.exs")
 
   def new(filename) do
     config_dir = config_dir()
@@ -29,8 +29,12 @@ defmodule Mix.Tasks.Defdo.Repo.CompiledConfig do
 
   defp ensure_extension(filename) do
     case Path.extname(filename) do
-      "" -> "#{filename}.exs"
-      ".exs" -> filename
+      "" ->
+        "#{filename}.exs"
+
+      ".exs" ->
+        filename
+
       _ ->
         Mix.raise("""
         Only .exs extension is allowed for the filename.
@@ -86,6 +90,7 @@ end'
   def config_dir do
     {:ok, filename} = Mix.Project.config()[:config_path] |> Path.safe_relative_to(".")
     config_dir = filename |> Path.dirname()
+
     if File.dir?(config_dir) do
       config_dir
     else
@@ -113,12 +118,12 @@ end'
 
   defp error do
     Mix.raise("""
-      Invalid arguments to defdo.repo.helper, expects one of:
+    Invalid arguments to defdo.repo.helper, expects one of:
 
-          mix defdo.repo.compiled_config
-          mix defdo.repo.compiled_config --filename extra_config
-          mix defdo.repo.compiled_config --filename extra_config.exs
-      """)
+        mix defdo.repo.compiled_config
+        mix defdo.repo.compiled_config --filename extra_config
+        mix defdo.repo.compiled_config --filename extra_config.exs
+    """)
   end
 
   defp otp_app do

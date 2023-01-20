@@ -15,7 +15,9 @@ defmodule Defdo.Tasks.RepoCompiledConfigTest do
            end) =~ "import_config \"defdo_compiled_config.exs\""
 
     assert File.exists?("config/defdo_compiled_config.exs")
-    assert File.read!("config/defdo_compiled_config.exs") =~ "defmodule Defdo.Repo.CompileConfig do"
+
+    assert File.read!("config/defdo_compiled_config.exs") =~
+             "defmodule Defdo.Repo.CompileConfig do"
 
     # cleanup
     assert :ok = File.rm("config/compiled_test.exs")
