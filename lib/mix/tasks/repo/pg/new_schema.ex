@@ -7,51 +7,60 @@ defmodule Mix.Tasks.Defdo.Repo.Pg.NewSchema do
   Remember that you can put an alias to ensure that you have it before run migrations.
   """
   use Mix.Task
+  require Logger
 
   def run([]), do: error()
+
   def run(args) do
-    valid_options = [schema: :string, repo: :string]
+    valid_options = [schema: :string, repo: :string, debug: :boolean, otp_app: :string]
 
-    case OptionParser.parse_head!(args, strict: valid_options) do
-      {[schema: schema, repo: repo], []} ->
-        new(schema, repo)
+    case OptionParser.parse(args, strict: valid_options) do
+      {opts, [], []} ->
+        new(opts)
 
-      {_, _} ->
+      {_, _, _} ->
         error()
     end
   end
 
-  defp new(schema, repo) when is_bitstring(schema) do
-      [repo]
-      |> Module.safe_concat()
-      |> create_schemas(schema)
+  defp new(opts) do
+    repo = opts[:repo]
 
-    rescue
-      ArgumentError ->
-        otp_app = otp_app()
-        Mix.raise("""
-        Ensure that you have the repo configuration for #{repo}:
+    [repo]
+    |> Module.safe_concat()
+    |> create_schemas(opts[:schema], opts)
+  rescue
+    ArgumentError ->
+      repo = opts[:repo]
+      otp_app = opts[:otp_app] || otp_app()
 
-        config #{otp_app}, #{repo},
-          username: "postgres",
-          password: "postgres",
-          hostname: "localhost",
-          database: "#{otp_app}_dev",
-        """)
+      Mix.raise("""
+      Ensure that you have the repo configuration for #{repo}:
+
+      config #{otp_app}, #{repo},
+        username: "postgres",
+        password: "postgres",
+        hostname: "localhost",
+        database: "#{otp_app}_dev",
+      """)
   end
 
-  def create_schemas(repo, schema) when is_bitstring(schema) do
+  def create_schemas(repo, schema, opts) when is_bitstring(schema) do
     schemas = String.split(schema, ",")
-    create_schemas(repo, schemas)
+    create_schemas(repo, schemas, opts)
   end
 
-  def create_schemas(repo, schemas) when is_atom(repo) when is_list(schemas) do
-    config = get_config(repo)
+  def create_schemas(repo, schemas, opts) when is_atom(repo) when is_list(schemas) do
+    config = get_config(repo, opts)
 
     schema_statements =
       schemas
-      |> Enum.map(&("CREATE SCHEMA IF NOT EXISTS #{&1};"))
+      |> Enum.map(&"CREATE SCHEMA IF NOT EXISTS #{&1};")
       |> Enum.join(" ")
+
+    if opts[:debug] do
+      Logger.debug(["Config is ", inspect(config)])
+    end
 
     """
     export PGPASSWORD=#{config[:password]};
@@ -61,8 +70,9 @@ defmodule Mix.Tasks.Defdo.Repo.Pg.NewSchema do
     |> Mix.shell().cmd()
   end
 
-  defp get_config(repo) when is_atom(repo) do
-    Application.get_env(otp_app(), repo)
+  defp get_config(repo, opts) when is_atom(repo) do
+    otp_app = opts[:otp_app] || otp_app()
+    Application.get_env(safe_atom(otp_app), repo)
   end
 
   def otp_app do
@@ -72,8 +82,17 @@ defmodule Mix.Tasks.Defdo.Repo.Pg.NewSchema do
 
   defp error do
     Mix.raise("""
-      Invalid arguments to defdo.repo.pg.new_schema, expected:
-          mix defdo.repo.pg.new_schema --schema defdo_apps --repo Defdo.App.Repo
-      """)
+    Invalid arguments to defdo.repo.pg.new_schema, expected:
+        mix defdo.repo.pg.new_schema --schema defdo_apps --repo Defdo.App.Repo
+    """)
+  end
+
+  defp safe_atom(term) when is_atom(term), do: term
+
+  defp safe_atom(term) do
+    String.to_existing_atom(term)
+  rescue
+    ArgumentError ->
+      String.to_atom(term)
   end
 end
