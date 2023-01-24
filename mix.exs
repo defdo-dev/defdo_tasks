@@ -15,7 +15,7 @@ defmodule Defdo.Tasks.MixProject do
       # exdocs
       name: "Defdo.Tasks",
       source_url: "https://github.com/defdo-dev/defdo_tasks",
-      homepage_url: "https://oss.defdo.ninja",
+      homepage_url: "https://foss.defdo.ninja",
       docs: [
         # The main page in the docs
         # main: "Defdo.Tasks.Application",
