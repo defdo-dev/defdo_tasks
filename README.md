@@ -1,6 +1,6 @@
 # Defdo.Tasks
 
-**TODO: Add description**
+A set of mix tasks to work with defdo_apps.
 
 ## Installation
 
