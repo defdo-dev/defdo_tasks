@@ -77,10 +77,10 @@ defmodule Mix.Tasks.Defdo.Repo.CompiledConfig do
     [type: :timestamptz] ++ extras
 
   def migration_primary_key(extras \\ []) when is_list(extras), do:
-    [type: :timestamptz] ++ extras
+    [type: :binary_id] ++ extras
 
   def migration_foreign_key(extras \\ []) when is_list(extras), do:
-    [type: :timestamptz] ++ extras
+    [type: :binary_id] ++ extras
 
   def otp_app do
     module = Mix.Project.get()
