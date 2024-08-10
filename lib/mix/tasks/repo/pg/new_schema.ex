@@ -62,9 +62,11 @@ defmodule Mix.Tasks.Defdo.Repo.Pg.NewSchema do
       Logger.debug(["Config is ", inspect(config)])
     end
 
+    port = config[:port] || 5432
+
     """
     export PGPASSWORD=#{config[:password]};
-    psql -U #{config[:username]} -h #{config[:hostname]} -d #{config[:database]} \
+    psql -U #{config[:username]} -h #{config[:hostname]} -d #{config[:database]} -p #{port} \
       -c "#{schema_statements}"
     """
     |> Mix.shell().cmd()
