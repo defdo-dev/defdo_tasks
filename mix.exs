@@ -84,13 +84,23 @@ defmodule Defdo.Tasks.MixProject do
 
   # No `precommit` alias existed on this branch (verified: `mix help precommit`
   # raised "The task \"precommit\" could not be found"), even though issue #4's
-  # gate calls it "a real gate in this repo". Every other defdo_* package
-  # defines one; this is the estate's majority shape (core_graph, defdo_compliance,
-  # defdo_desk, defdo_foss, defdo_notification_hub, defdo_shop, defdo_wa_client,
-  # defdo_wa_service), added here rather than invented.
+  # gate calls it "a real gate in this repo".
+  #
+  # Every step here must *check* rather than *fix*, or the gate passes by
+  # repairing what it was meant to catch. The shape most of the estate carries
+  # — `deps.unlock --unused` and a bare `format` — does exactly that: the first
+  # rewrites mix.lock, the second rewrites the source, and then `test` runs
+  # against the repaired tree and reports green. Their checking forms are
+  # `--check-unused` and `--check-formatted`. Same defect was just removed from
+  # defdo_order_visor; do not copy the majority shape back in.
   defp aliases do
     [
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --check-unused",
+        "format --check-formatted",
+        "test"
+      ]
     ]
   end
 end
