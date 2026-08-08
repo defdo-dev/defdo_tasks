@@ -99,6 +99,218 @@ defmodule Defdo.Tasks.Saas.MigratorChain do
     end
   end
 
+  @typedoc """
+  How the migrator target version was resolved for an app, and against what.
+
+    * `:version` — the target migrator version to compare wrappers against
+    * `:source` — where that number was read: `:deps` (the resolved dependency's
+      migrator source), `:lock` (mapped from `mix.lock`), or `:assumed` (neither
+      was readable)
+    * `:confidence` — `:resolved`, `:from_lock` or `:assumed`, tracking `:source`
+    * `:dependency` — the OTP application the target was read from
+    * `:dependency_version` — that dependency's version, so a caller sees *what*
+      it was compared against rather than trusting a bare number; `nil` when the
+      target was assumed
+    * `:reason` — set only for `:assumed`, explaining why the number is a floor
+      rather than a reading
+  """
+  @type resolution :: %{
+          version: pos_integer(),
+          source: :deps | :lock | :assumed,
+          confidence: :resolved | :from_lock | :assumed,
+          dependency: atom(),
+          dependency_version: String.t() | nil,
+          reason: String.t() | nil
+        }
+
+  # `defdo_tenant` version floors mapped to the highest migrator version they
+  # ship, newest floor first. Verified against the estate: 0.10.5 carries
+  # `current_version: 3`; 0.12.0 and 0.13.0 carry 4 -- v4 adds
+  # `tenant_profiles.deleted_at`, which is why 0.11+ maps to 4. A locked version
+  # below the lowest floor here is left unmapped so the resolver falls through to
+  # `:assumed` rather than inventing a target for a version it does not know.
+  @lock_targets [{"0.11.0", 4}, {"0.10.0", 3}]
+
+  @doc """
+  Resolves the migrator target version for the app at `root`, reporting where the
+  number came from rather than assuming it.
+
+  This is what `target_version/1` cannot do over stdio: that function probes
+  *loaded* modules, and the MCP server runs in this package's process where
+  `defdo_tenant` is never loaded, so it always answered `:assumed`. This reads
+  the app's own tree instead. Resolution order:
+
+    1. `:deps` — read `current_version` from the migrator source the app resolved
+       (`<root>/deps/defdo_tenant/lib/defdo/migrator.ex`, or
+       `<package_path>/lib/defdo/migrator.ex` when the app resolves it through a
+       `path:` dependency and `:package_path` is given). Confidence `:resolved`.
+    2. `:lock` — read the package version from `<root>/mix.lock` and map it to a
+       known target. Confidence `:from_lock`.
+    3. `:assumed` — neither is readable; fall back to the known floor (v#{@known_floor})
+       and say so in `:reason`. Confidence `:assumed`.
+
+  Options: `:package` (default `:defdo_tenant`), `:package_path` (the package root
+  for a `path:`-resolved dependency) and `:migrator_source` (an explicit override
+  of the migrator source file to read).
+  """
+  @spec resolve_target(String.t(), keyword()) :: resolution()
+  def resolve_target(root, opts \\ []) when is_binary(root) do
+    package = Keyword.get(opts, :package, :defdo_tenant)
+
+    resolve_from_deps(root, package, opts) ||
+      resolve_from_lock(root, package) ||
+      assumed_resolution(root, package)
+  end
+
+  defp resolve_from_deps(root, package, opts) do
+    with {:ok, source} <- File.read(migrator_source_path(root, package, opts)),
+         version when is_integer(version) <- current_version_from_source(source) do
+      %{
+        version: version,
+        source: :deps,
+        confidence: :resolved,
+        dependency: package,
+        dependency_version: dependency_version(root, package, opts),
+        reason: nil
+      }
+    else
+      _not_readable -> nil
+    end
+  end
+
+  defp resolve_from_lock(root, package) do
+    with {:ok, lock} <- File.read(Path.join(root, "mix.lock")),
+         version when is_binary(version) <- locked_version_from_source(lock, package),
+         target when is_integer(target) <- target_for_locked_version(version) do
+      %{
+        version: target,
+        source: :lock,
+        confidence: :from_lock,
+        dependency: package,
+        dependency_version: version,
+        reason: nil
+      }
+    else
+      _not_readable -> nil
+    end
+  end
+
+  defp assumed_resolution(root, package) do
+    %{
+      version: @known_floor,
+      source: :assumed,
+      confidence: :assumed,
+      dependency: package,
+      dependency_version: nil,
+      reason:
+        "could not read #{package}'s current_version from deps or mix.lock under " <>
+          "#{root}; v#{@known_floor} is the last version this package knows about, " <>
+          "not a reading of what the app has installed"
+    }
+  end
+
+  defp migrator_source_path(root, package, opts) do
+    cond do
+      source = Keyword.get(opts, :migrator_source) ->
+        source
+
+      package_path = Keyword.get(opts, :package_path) ->
+        Path.join([package_path, "lib", "defdo", "migrator.ex"])
+
+      true ->
+        Path.join([root, "deps", to_string(package), "lib", "defdo", "migrator.ex"])
+    end
+  end
+
+  defp dependency_version(root, package, opts) do
+    version_file =
+      case Keyword.get(opts, :package_path) do
+        nil -> Path.join([root, "deps", to_string(package), "VERSION"])
+        package_path -> Path.join(package_path, "VERSION")
+      end
+
+    case File.read(version_file) do
+      {:ok, contents} -> String.trim(contents)
+      {:error, _reason} -> lock_version(root, package)
+    end
+  end
+
+  defp lock_version(root, package) do
+    case File.read(Path.join(root, "mix.lock")) do
+      {:ok, lock} -> locked_version_from_source(lock, package)
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc """
+  Reads `current_version` from a migrator module's source. Returns `nil` when the
+  source declares none.
+
+      iex> src = ~s|use Defdo.Migrator, control_table: "t", current_version: 4|
+      iex> Defdo.Tasks.Saas.MigratorChain.current_version_from_source(src)
+      4
+
+      iex> Defdo.Tasks.Saas.MigratorChain.current_version_from_source("no version here")
+      nil
+  """
+  @spec current_version_from_source(String.t()) :: pos_integer() | nil
+  def current_version_from_source(source) when is_binary(source) do
+    case Regex.run(~r/current_version:\s*(\d+)/, source) do
+      [_all, version] -> String.to_integer(version)
+      nil -> nil
+    end
+  end
+
+  @doc """
+  Reads a package's pinned version from `mix.lock` source. Returns `nil` when the
+  package is not locked. The trailing `":` anchors the name so `defdo_tenant`
+  never matches `defdo_tenant_plug`.
+
+      iex> lock = ~s|  "defdo_tenant": {:hex, :defdo_tenant, "0.12.0", "abc", [:mix], [], "hexpm:defdo"},|
+      iex> Defdo.Tasks.Saas.MigratorChain.locked_version_from_source(lock, :defdo_tenant)
+      "0.12.0"
+
+      iex> Defdo.Tasks.Saas.MigratorChain.locked_version_from_source("%{}", :defdo_tenant)
+      nil
+  """
+  @spec locked_version_from_source(String.t(), atom()) :: String.t() | nil
+  def locked_version_from_source(lock, package) when is_binary(lock) and is_atom(package) do
+    name = Regex.escape(to_string(package))
+
+    case Regex.run(~r/"#{name}":\s*\{:hex,\s*:#{name},\s*"([^"]+)"/, lock) do
+      [_all, version] -> version
+      nil -> nil
+    end
+  end
+
+  @doc """
+  Maps a `defdo_tenant` version to the highest migrator version it ships, or
+  `nil` when the version is below the lowest floor this package knows about (so
+  the resolver falls through to `:assumed` rather than guessing).
+
+      iex> Defdo.Tasks.Saas.MigratorChain.target_for_locked_version("0.13.0")
+      4
+
+      iex> Defdo.Tasks.Saas.MigratorChain.target_for_locked_version("0.10.5")
+      3
+
+      iex> Defdo.Tasks.Saas.MigratorChain.target_for_locked_version("0.9.0")
+      nil
+  """
+  @spec target_for_locked_version(String.t()) :: pos_integer() | nil
+  def target_for_locked_version(version) when is_binary(version) do
+    case Version.parse(version) do
+      {:ok, parsed} -> target_at_or_above(parsed)
+      :error -> nil
+    end
+  end
+
+  defp target_at_or_above(parsed) do
+    Enum.find_value(@lock_targets, fn {floor, target} ->
+      if Version.compare(parsed, floor) != :lt, do: target
+    end)
+  end
+
   @doc """
   Finds every wrapper migration for `migrator` in a list of `{path, source}`
   pairs.
