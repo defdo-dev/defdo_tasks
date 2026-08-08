@@ -81,6 +81,13 @@ defmodule Defdo.Tasks.MCP.Server do
               "The Postgres schema prefix the app expects. When given, wrappers targeting a " <>
                 "different prefix are reported under `prefix_conflicts`. Omitted by default, " <>
                 "in which case that check is skipped rather than run against a guessed prefix."
+          },
+          "defdo_tenant_path" => %{
+            "type" => "string",
+            "description" =>
+              "Path to the defdo_tenant package root, for an app that resolves it through a " <>
+                "`path:` dependency rather than `<root>/deps/defdo_tenant`. When given, the " <>
+                "target version is read from `<path>/lib/defdo/migrator.ex`."
           }
         },
         "additionalProperties" => false
@@ -210,16 +217,19 @@ defmodule Defdo.Tasks.MCP.Server do
       migrations_path = Map.get(arguments, "migrations_path", default_migrations_path(root))
 
       wrappers = MigratorChain.scan_path(migrations_path, migrator)
-      {target, confidence} = target_version(migrator)
+      resolution = MigratorChain.resolve_target(root, resolve_opts(arguments))
 
       tool_result(%{
         "root" => root,
         "migrations_path" => migrations_path,
         "migrator" => migrator,
-        "target_version" => target,
-        "target_version_confidence" => confidence,
+        "target_version" => resolution.version,
+        "target_version_source" => to_string(resolution.source),
+        "target_version_confidence" => to_string(resolution.confidence),
+        "resolved_dependency" => to_string(resolution.dependency),
+        "resolved_version" => resolution.dependency_version,
         "wrappers" => wrappers,
-        "status" => render_status(MigratorChain.status(wrappers, target)),
+        "status" => render_status(wrappers, resolution),
         "asymmetric" => MigratorChain.asymmetric(wrappers),
         "prefix_checked" => Map.has_key?(arguments, "prefix"),
         "prefix_conflicts" => prefix_conflicts(wrappers, Map.get(arguments, "prefix"))
@@ -298,11 +308,27 @@ defmodule Defdo.Tasks.MCP.Server do
 
   defp default_migrations_path(root), do: Path.join([root, "priv", "repo", "migrations"])
 
-  defp target_version(migrator) do
-    case MigratorChain.target_version(migrator) do
-      {:ok, version} -> {version, "verified"}
-      {:assumed, version} -> {version, "assumed"}
+  defp resolve_opts(arguments) do
+    case Map.get(arguments, "defdo_tenant_path") do
+      nil -> []
+      path -> [package_path: path]
     end
+  end
+
+  # An assumed target must not be dressed up as a status: `status/2` would report
+  # `current`/`behind`/`missing` against a number that was never read, which is
+  # exactly the confident-wrong answer issue #7 exists to stop. Report `unknown`
+  # with the reason, still surfacing how far the wrappers reach.
+  defp render_status(wrappers, %{confidence: :assumed} = resolution) do
+    %{
+      "kind" => "unknown",
+      "reason" => resolution.reason,
+      "applied" => MigratorChain.applied_version(wrappers)
+    }
+  end
+
+  defp render_status(wrappers, %{version: target}) do
+    render_status(MigratorChain.status(wrappers, target))
   end
 
   # `MigratorChain.status/2`'s typespec includes `:unknown`, but its body never

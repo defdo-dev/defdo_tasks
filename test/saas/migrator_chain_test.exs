@@ -188,6 +188,72 @@ defmodule Defdo.Tasks.Saas.MigratorChainTest do
     end
   end
 
+  describe "resolve_target/2" do
+    @migrator_source ~S'''
+    defmodule Defdo.Tenant.Migrator do
+      use Defdo.Migrator,
+        control_table: "tenant_profiles",
+        prefix: "defdo_tenant",
+        current_version: 4
+    end
+    '''
+
+    @tag :tmp_dir
+    test "reads current_version from the resolved deps migrator source", %{tmp_dir: tmp_dir} do
+      dep = Path.join([tmp_dir, "deps", "defdo_tenant"])
+      File.mkdir_p!(Path.join(dep, "lib/defdo"))
+      File.write!(Path.join(dep, "lib/defdo/migrator.ex"), @migrator_source)
+      File.write!(Path.join(dep, "VERSION"), "0.13.0")
+
+      resolution = MigratorChain.resolve_target(tmp_dir)
+
+      assert resolution.version == 4
+      assert resolution.source == :deps
+      assert resolution.confidence == :resolved
+      assert resolution.dependency == :defdo_tenant
+      assert resolution.dependency_version == "0.13.0"
+    end
+
+    @tag :tmp_dir
+    test "reads a path:-resolved dependency from :package_path", %{tmp_dir: tmp_dir} do
+      pkg = Path.join(tmp_dir, "defdo_tenant_checkout")
+      File.mkdir_p!(Path.join(pkg, "lib/defdo"))
+      File.write!(Path.join(pkg, "lib/defdo/migrator.ex"), @migrator_source)
+      File.write!(Path.join(pkg, "VERSION"), "0.13.1")
+
+      resolution = MigratorChain.resolve_target(tmp_dir, package_path: pkg)
+
+      assert resolution.version == 4
+      assert resolution.source == :deps
+      assert resolution.dependency_version == "0.13.1"
+    end
+
+    @tag :tmp_dir
+    test "falls back to mix.lock when deps are absent", %{tmp_dir: tmp_dir} do
+      File.write!(
+        Path.join(tmp_dir, "mix.lock"),
+        ~s|  "defdo_tenant": {:hex, :defdo_tenant, "0.10.5", "abc", [:mix], [], "hexpm:defdo"},\n|
+      )
+
+      resolution = MigratorChain.resolve_target(tmp_dir)
+
+      assert resolution.version == 3
+      assert resolution.source == :lock
+      assert resolution.confidence == :from_lock
+      assert resolution.dependency_version == "0.10.5"
+    end
+
+    @tag :tmp_dir
+    test "assumes only when neither deps nor lock can be read", %{tmp_dir: tmp_dir} do
+      resolution = MigratorChain.resolve_target(tmp_dir)
+
+      assert resolution.source == :assumed
+      assert resolution.confidence == :assumed
+      assert resolution.dependency_version == nil
+      assert resolution.reason =~ "not a reading"
+    end
+  end
+
   describe "render/3" do
     test "pins up and down to the same explicit version" do
       source = MigratorChain.render(MyApp, 4, "my_app")
