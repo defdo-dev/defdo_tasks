@@ -13,6 +13,7 @@ defmodule Defdo.Tasks.MixProject do
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
+      aliases: aliases(),
       description: "Mix tasks that scaffold and audit defdo SaaS apps.",
       package: package(),
       # exdocs
@@ -21,6 +22,11 @@ defmodule Defdo.Tasks.MixProject do
       homepage_url: "https://foss.defdo.ninja",
       docs: docs()
     ]
+  end
+
+  # `precommit` ends in `mix test`, which refuses to run outside the test env.
+  def cli do
+    [preferred_envs: [precommit: :test]]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
@@ -66,8 +72,35 @@ defmodule Defdo.Tasks.MixProject do
       # compiled only when Igniter is present -- the same guard defdo_tenant
       # uses for `mix defdo_tenant.install`.
       {:igniter, "~> 0.6 or ~> 0.7 or ~> 0.8", optional: true},
+      # Required, not transitive: the MCP tools/call payloads are encoded here
+      # directly (`lib/defdo/tasks/mcp`), so a consuming app without Igniter
+      # (which is the only other path jason previously arrived by) must still
+      # get it.
+      {:jason, "~> 1.4"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+    ]
+  end
+
+  # No `precommit` alias existed on this branch (verified: `mix help precommit`
+  # raised "The task \"precommit\" could not be found"), even though issue #4's
+  # gate calls it "a real gate in this repo".
+  #
+  # Every step here must *check* rather than *fix*, or the gate passes by
+  # repairing what it was meant to catch. The shape most of the estate carries
+  # — `deps.unlock --unused` and a bare `format` — does exactly that: the first
+  # rewrites mix.lock, the second rewrites the source, and then `test` runs
+  # against the repaired tree and reports green. Their checking forms are
+  # `--check-unused` and `--check-formatted`. Same defect was just removed from
+  # defdo_order_visor; do not copy the majority shape back in.
+  defp aliases do
+    [
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --check-unused",
+        "format --check-formatted",
+        "test"
+      ]
     ]
   end
 end
