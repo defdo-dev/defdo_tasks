@@ -20,6 +20,7 @@ defmodule Mix.Tasks.Defdo.Repo.Pg.CreateExtension do
   """
   use Mix.Task
 
+  alias Defdo.Tasks.Repo.Extensions
   alias Defdo.Tasks.Repo.Psql
 
   @impl Mix.Task
@@ -51,7 +52,8 @@ defmodule Mix.Tasks.Defdo.Repo.Pg.CreateExtension do
     config = Psql.config!(repo, opts)
 
     extensions
-    |> Enum.map_join(" ", &"CREATE EXTENSION IF NOT EXISTS #{&1};")
+    |> Extensions.validate_names!()
+    |> Enum.map_join(" ", &~s(CREATE EXTENSION IF NOT EXISTS "#{&1}";))
     |> then(&Psql.command(config, &1))
     |> Mix.shell().cmd()
   end
