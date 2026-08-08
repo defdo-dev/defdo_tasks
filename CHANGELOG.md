@@ -1,3 +1,39 @@
+# 0.3.0
+
+## Added
+
+- `Defdo.Tasks.Repo.Extensions` — a declarative Postgres-extension precheck
+  (#9). `ensure!/3` verifies required extensions exist and, on a miss, raises a
+  `MissingExtensionError` naming every missing extension plus the exact
+  remediation command (`mix defdo.repo.pg.create_extension --name <ext>
+  --repo <Repo> --otp-app <app>`). Opt-in `create_extensions: true` tries
+  `CREATE EXTENSION IF NOT EXISTS` first and falls back to the actionable error
+  on insufficient privilege. Raises a plain exception (never `Mix.raise`), so it
+  is safe inside a release `Release.migrate/0`. Names are validated and
+  double-quoted in DDL; the existing `defdo.repo.pg.create_extension` task now
+  reuses that validation.
+- `mix defdo.ssl.setup` — generates local dev HTTPS certs via defdo's custom
+  mkcert build for `<project_name>` + `localhost`, writing
+  `priv/ssl/<project_name>{,_key}.pem`, and injects an idempotent, marker-
+  delimited `https:` block into `config/dev.exs` and `config/runtime.exs` (#1).
+  The mkcert download URL/version are overridable (`--url`/`--base-url`/
+  `--version`, or config) with a documented, unverified default.
+- `defdo_saas.status` — a fourth read-only MCP tool answering "where are we"
+  from live estate state: open PRs (via `gh`, degrading gracefully), dependency
+  drift with the two- vs three-segment `~>` cap distinction, migrator wrapper
+  chain (including indirect wrappers), blocked-by from published requirements,
+  and local-vs-origin divergence (#8).
+
+## Changed
+
+- `defdo_saas.migrator_chain` now resolves the migrator target from the
+  dependency the app actually has instead of assuming it (#7). The payload
+  reports `target_version_source` (`deps`/`lock`/`assumed`),
+  `target_version_confidence` (`resolved`/`from_lock`/`assumed`), and the
+  resolved dependency/version. When the source is `assumed`, `status` no longer
+  claims `current` against a guessed number — it reports `unknown` with a
+  reason.
+
 # 0.2.0
 
 First release since 2024-08-10. Adopts Igniter and turns this package into the
