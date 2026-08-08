@@ -1,0 +1,66 @@
+---
+# defdo_tasks Woodpecker CI — branch/PR pipeline (companion to
+# .woodpecker/hex-publish.yml, which is tag-only).
+#
+# Validates a branch or PR WITHOUT publishing: format, compile, and the full
+# test suite. This package has NO database dependency — its tests drive gh/git
+# through injected runners and never touch Postgres — so there is no service
+# block and no PGHOST contract, unlike the sibling library CIs.
+#
+# Runs on the DOCKER/kubernetes agent (`platform: linux/amd64`). The label is
+# REQUIRED: without it jobs can land on the local (exec) agent, which tries to
+# run the `image:` string as a host binary and dies with
+# `exec: "<image>": executable file not found`.
+
+labels:
+  platform: linux/amd64
+
+when:
+  - event: [push, pull_request]
+    branch: main
+  - event: manual
+  - event: cron
+
+steps:
+  - name: format-and-compile
+    image: elixir:1.19.5
+    environment:
+      HEX_ORG_TOKEN:
+        from_secret: hex_org_token
+      MIX_ENV: test
+    commands:
+      - |
+        set -e
+        HEX_ORG_NAME="defdo"
+        export HEX_ORG_NAME HEX_ORG_TOKEN
+
+        mix do local.hex --force + local.rebar --force
+
+        if [ -n "$HEX_ORG_TOKEN" ]; then
+          mix hex.organization auth "$HEX_ORG_NAME" --key "$HEX_ORG_TOKEN"
+        fi
+
+        mix deps.get
+        mix format --check-formatted
+        mix compile --warnings-as-errors
+
+  - name: test
+    image: elixir:1.19.5
+    environment:
+      HEX_ORG_TOKEN:
+        from_secret: hex_org_token
+      MIX_ENV: test
+    commands:
+      - |
+        set -e
+        HEX_ORG_NAME="defdo"
+        export HEX_ORG_NAME HEX_ORG_TOKEN
+
+        mix do local.hex --force + local.rebar --force
+
+        if [ -n "$HEX_ORG_TOKEN" ]; then
+          mix hex.organization auth "$HEX_ORG_NAME" --key "$HEX_ORG_TOKEN"
+        fi
+
+        mix deps.get
+        mix test

@@ -1,0 +1,122 @@
+---
+# Hex publish pipeline — publishes defdo_tasks to the private `defdo` Hex
+# organization on tag push.
+#
+# Secrets (global Woodpecker secrets, available on `tag` events):
+#   hex_api_key     — Hex user API key with publish rights on the defdo org
+#   hex_org_token   — Hex org read/auth key for the private `defdo` repo
+#   discord_webhook — optional release notification
+#
+# Trigger: pushing a version tag. This package's mix.exs sets
+# `source_ref: "v#{@version}"`, so tags carry a `v` prefix (e.g. `v0.3.0`);
+# the version guard strips a leading `v` before comparing to mix.exs, so a
+# bare `0.3.0` tag works too.
+#
+# hex.publish is idempotent here: a rerun (flaky agent, network blip after a
+# previous run already published) checks the Hex API for the release first and
+# skips instead of failing with "must include the --replace flag". --replace
+# is never used — silently overwriting a published version is a worse failure
+# than a red pipeline.
+#
+# Runs on the DOCKER/kubernetes agent (`platform: linux/amd64`), NOT the
+# darwin/arm64 exec agent. The label is REQUIRED (see ci.yml).
+
+labels:
+  platform: linux/amd64
+
+when:
+  - event: tag
+
+steps:
+  - name: validate
+    image: elixir:1.19.5
+    environment:
+      HEX_API_KEY:
+        from_secret: hex_api_key
+      HEX_ORG_TOKEN:
+        from_secret: hex_org_token
+      MIX_ENV: test
+    commands:
+      - |
+        set -e
+        HEX_ORG_NAME="defdo"
+        export HEX_API_KEY HEX_ORG_NAME HEX_ORG_TOKEN
+
+        mix do local.hex --force + local.rebar --force
+
+        if [ -n "$HEX_ORG_TOKEN" ]; then
+          mix hex.organization auth "$HEX_ORG_NAME" --key "$HEX_ORG_TOKEN"
+        fi
+
+        mix deps.get
+
+        # The tag must match the version mix.exs will publish, or a
+        # mis-tagged release ships under the wrong number.
+        TAG="$${CI_COMMIT_TAG#v}"
+        VSN="$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')"
+        if [ "$TAG" != "$VSN" ]; then
+          echo "ERROR: tag ($TAG) does not match mix.exs version ($VSN)"
+          exit 1
+        fi
+
+        mix format --check-formatted
+        mix compile --warnings-as-errors
+        mix test
+        mix hex.build
+
+  - name: hex-publish
+    image: elixir:1.19.5
+    depends_on: [validate]
+    environment:
+      HEX_API_KEY:
+        from_secret: hex_api_key
+      HEX_ORG_TOKEN:
+        from_secret: hex_org_token
+    commands:
+      - |
+        set -e
+        HEX_ORG_NAME="defdo"
+        export HEX_API_KEY HEX_ORG_NAME HEX_ORG_TOKEN
+
+        if [ -z "$HEX_API_KEY" ]; then
+          echo "ERROR: HEX_API_KEY is required to publish"
+          exit 1
+        fi
+
+        mix do local.hex --force + local.rebar --force
+
+        if [ -n "$HEX_ORG_TOKEN" ]; then
+          mix hex.organization auth "$HEX_ORG_NAME" --key "$HEX_ORG_TOKEN"
+        fi
+
+        mix deps.get
+
+        VERSION="$${CI_COMMIT_TAG#v}"
+        STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+          -H "Authorization: $HEX_API_KEY" \
+          "https://hex.pm/api/repos/defdo/packages/defdo_tasks/releases/$VERSION")"
+        if [ "$STATUS" = "200" ]; then
+          echo "defdo_tasks $VERSION already published to Hex (HTTP 200); skipping."
+          exit 0
+        fi
+
+        mix hex.publish --yes
+
+  # Announce the Hex publish on Discord. Optional: skips when the webhook
+  # secret is not configured.
+  - name: notify
+    image: alpine:3
+    depends_on: [hex-publish]
+    environment:
+      DISCORD_WEBHOOK:
+        from_secret: discord_webhook
+    commands:
+      - apk add --no-cache curl > /dev/null
+      - |
+        if [ -z "$${DISCORD_WEBHOOK:-}" ]; then
+          echo "DISCORD_WEBHOOK not set; skipping notification."
+          exit 0
+        fi
+        curl -sS -H "Content-Type: application/json" -X POST \
+          -d "{\"content\":\"defdo/defdo_tasks $${CI_COMMIT_TAG} published to Hex.\"}" \
+          "$${DISCORD_WEBHOOK}"
