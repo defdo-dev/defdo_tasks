@@ -51,9 +51,11 @@ steps:
         mix deps.get
 
         # The tag must match the version mix.exs will publish, or a
-        # mis-tagged release ships under the wrong number.
+        # mis-tagged release ships under the wrong number. Read @version
+        # straight from mix.exs — invoking `mix run` here would recompile and
+        # interleave build output into the captured version.
         TAG="$${CI_COMMIT_TAG#v}"
-        VSN="$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')"
+        VSN="$(grep -oE '@version "[^"]+"' mix.exs | head -1 | sed -E 's/@version "([^"]+)"/\1/')"
         if [ "$TAG" != "$VSN" ]; then
           echo "ERROR: tag ($TAG) does not match mix.exs version ($VSN)"
           exit 1
