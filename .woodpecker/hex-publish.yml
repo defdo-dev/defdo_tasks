@@ -7,10 +7,9 @@
 #   hex_org_token   — Hex org read/auth key for the private `defdo` repo
 #   discord_webhook — optional release notification
 #
-# Trigger: pushing a version tag. This package's mix.exs sets
-# `source_ref: "v#{@version}"`, so tags carry a `v` prefix (e.g. `v0.3.0`);
-# the version guard strips a leading `v` before comparing to mix.exs, so a
-# bare `0.3.0` tag works too.
+# Trigger: pushing a version tag. Tags carry NO `v` prefix (e.g. `0.3.0`),
+# matching mix.exs `@version` and the estate convention; the guard tolerates a
+# stray leading `v` but the canonical tag is bare.
 #
 # hex.publish is idempotent here: a rerun (flaky agent, network blip after a
 # previous run already published) checks the Hex API for the release first and
@@ -98,7 +97,8 @@ steps:
           -H "Authorization: $HEX_API_KEY" \
           "https://hex.pm/api/repos/defdo/packages/defdo_tasks/releases/$VERSION")"
         if [ "$STATUS" = "200" ]; then
-          echo "defdo_tasks $VERSION already published to Hex (HTTP 200); skipping."
+          echo "defdo_tasks $VERSION already published (HTTP 200); refreshing docs only."
+          mix hex.publish docs --yes
           exit 0
         fi
 

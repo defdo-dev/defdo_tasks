@@ -44,7 +44,7 @@ defmodule Defdo.Tasks.MixProject do
   defp docs do
     [
       main: "readme",
-      source_ref: "v#{@version}",
+      source_ref: @version,
       extras: ["README.md", "CHANGELOG.md"],
       groups_for_modules: [
         "SaaS stack": [

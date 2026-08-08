@@ -95,8 +95,8 @@ way a defdo SaaS app gets generated.
   tasks and pure helpers; consumers depend on it with `runtime: false`, and the
   supervisor owned nothing.
 - Minimum Elixir is now 1.15 (Igniter's floor).
-- `Mix.Tasks.Defdo.Repo.Pg.NewSchema.otp_app/0` and
-  `Mix.Tasks.Defdo.Repo.Pg.CreateExtension.otp_app/0` were removed in favour of
+- The `otp_app/0` helpers on `Mix.Tasks.Defdo.Repo.Pg.NewSchema` and
+  `Mix.Tasks.Defdo.Repo.Pg.CreateExtension` were removed in favour of
   `Defdo.Tasks.Repo.Psql.current_otp_app/0`. They were helpers on Mix task
   modules and are not expected to have callers.
 
