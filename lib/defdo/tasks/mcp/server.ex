@@ -4,20 +4,24 @@ defmodule Defdo.Tasks.MCP.Server do
 
   This mirrors `Defdo.Theme.Components.MCP.Server` (same JSON-RPC framing,
   the same `tools/list` + `tools/call` shape, the same error codes) rather
-  than inventing a second style. See issue #4 for why the surface stops here:
-  `Defdo.Tasks.Saas.Stack`, `Defdo.Tasks.Saas.MigratorChain` and
-  `Defdo.Tasks.Saas.Audit` are pure functions over a catalog and a project
-  tree, so asking them a question changes nothing. `mix defdo.saas.install`
-  and `mix defdo.saas.migrations` mutate files and stay Mix-only on purpose;
-  wrapping them here would give the estate a second interface to the same
-  behaviour, which is the exact duplication #4 exists to avoid.
+  than inventing a second style. `Defdo.Tasks.Saas.Stack`,
+  `Defdo.Tasks.Saas.MigratorChain`, `Defdo.Tasks.Saas.Audit` and
+  `Defdo.Tasks.Saas.Status` are read-only functions over a catalog, a project
+  tree and the estate's git state, so asking them a question changes nothing.
+  `mix defdo.saas.install` and `mix defdo.saas.migrations` mutate files and stay
+  Mix-only on purpose; wrapping them here would give the estate a second
+  interface to the same behaviour, which is the exact duplication #4 exists to
+  avoid.
 
-  Deliberately narrower than the precedent: no `resources/*` handlers. Nothing
-  in issue #4 asked for a resource surface, and adding one un-asked-for is the
-  same mistake as a fourth tool.
+  Issue #4 stopped at three tools because nothing then asked for a fourth. Issue
+  #8 does: `defdo_saas.status` answers "where are we" across the estate from live
+  state — a question the other three answer only per app, and only for the app
+  they are pointed at. It is still read-only, and still added under the same
+  `@tools` + tool-result shape rather than a new surface. There are still no
+  `resources/*` handlers: nothing has asked for one.
   """
 
-  alias Defdo.Tasks.Saas.{Audit, MigratorChain, Stack}
+  alias Defdo.Tasks.Saas.{Audit, MigratorChain, Stack, Status}
 
   @protocol_version "2025-06-18"
 
@@ -136,6 +140,53 @@ defmodule Defdo.Tasks.MCP.Server do
             "description" =>
               "When true, `exit_status` in the result also fails on warnings, matching " <>
                 "`mix defdo.saas.doctor --strict`."
+          }
+        },
+        "additionalProperties" => false
+      }
+    },
+    %{
+      "name" => "defdo_saas.status",
+      "description" =>
+        "Answer \"where are we\" across the estate from live state: open PRs (via gh, degrading " <>
+          "gracefully when it is missing or unauthenticated), dependency drift with the " <>
+          "two-segment-vs-three-segment `~>` distinction, the migrator wrapper chain including " <>
+          "versions that arrive indirectly through defdo_vault, what published dependency blocks " <>
+          "an upgrade, and how each repo's local checkout diverges from origin. Read-only.",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "root" => %{
+            "type" => "string",
+            "description" =>
+              "The estate root to scan for git repos. Defaults to the parent directory of the " <>
+                "server's default root, i.e. the sibling repos of the current project."
+          },
+          "package" => %{
+            "type" => "string",
+            "description" =>
+              "The dependency to check drift and blocked-by for. Defaults to \"defdo_tenant\"."
+          },
+          "latest" => %{
+            "type" => "string",
+            "description" =>
+              "The latest published version of `package`, supplied by the caller (this tool does " <>
+                "not hit the network). Omit and drift is reported against the requirement's cap " <>
+                "only, with the pinned-vs-latest comparison left unknown rather than guessed."
+          },
+          "fetch" => %{
+            "type" => "boolean",
+            "description" =>
+              "Run `git fetch` in each repo before reading origin, so origin answers are not " <>
+                "stale. Fetch is read-only (it updates remote-tracking refs, not the working " <>
+                "tree). Defaults to true."
+          },
+          "repos" => %{
+            "type" => "array",
+            "items" => %{"type" => "string"},
+            "description" =>
+              "An explicit list of repo directory names under `root`, instead of discovering " <>
+                "every git repo there."
           }
         },
         "additionalProperties" => false
@@ -262,9 +313,39 @@ defmodule Defdo.Tasks.MCP.Server do
     end
   end
 
+  defp call_tool("defdo_saas.status", arguments, state) do
+    root = Map.get(arguments, "root", default_estate_root(state))
+
+    if File.dir?(root) do
+      opts = status_opts(arguments)
+      tool_result(Status.report(root, opts))
+    else
+      {:error, -32_002, "Estate root not found", %{"root" => root}}
+    end
+  end
+
   defp call_tool(name, _arguments, _state) do
     {:error, -32_602, "Unknown tool", %{"name" => name}}
   end
+
+  # The estate is the current project's siblings: the parent of the default root.
+  defp default_estate_root(state) do
+    state.default_root |> Path.expand() |> Path.dirname()
+  end
+
+  defp status_opts(arguments) do
+    []
+    |> maybe_opt(:package, atomize(Map.get(arguments, "package")))
+    |> maybe_opt(:latest, Map.get(arguments, "latest"))
+    |> maybe_opt(:repos, Map.get(arguments, "repos"))
+    |> maybe_opt(:fetch, Map.get(arguments, "fetch"))
+  end
+
+  defp maybe_opt(opts, _key, nil), do: opts
+  defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp atomize(nil), do: nil
+  defp atomize(name) when is_binary(name), do: String.to_atom(name)
 
   # `Stack.all/0` and `Stack.select/1` disagree on purpose: `select/1` also
   # drops unpublished packages unless their tier was asked for by name.

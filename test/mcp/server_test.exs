@@ -77,14 +77,19 @@ defmodule Defdo.Tasks.MCP.ServerTest do
              Application.spec(:defdo_tasks, :vsn) |> to_string()
   end
 
-  test "lists exactly the three read-only tools" do
+  test "lists exactly the four read-only tools" do
     request = %{"jsonrpc" => "2.0", "id" => 2, "method" => "tools/list"}
 
     {response, _state} = Server.handle_message(request, state())
 
     names = Enum.map(response["result"]["tools"], & &1["name"])
 
-    assert names == ["defdo_saas.stack", "defdo_saas.migrator_chain", "defdo_saas.audit"]
+    assert names == [
+             "defdo_saas.stack",
+             "defdo_saas.migrator_chain",
+             "defdo_saas.audit",
+             "defdo_saas.status"
+           ]
   end
 
   test "an unknown method answers -32601" do
@@ -390,6 +395,58 @@ defmodule Defdo.Tasks.MCP.ServerTest do
 
       assert response["error"]["code"] == -32_602
       assert response["error"]["message"] == "Invalid dependency entry"
+    end
+  end
+
+  describe "defdo_saas.status" do
+    @tag :tmp_dir
+    test "composes a per-repo report and a summary, degrading git/gh gracefully",
+         %{tmp_dir: tmp_dir} do
+      # An isolated estate: a `.git` marker so the repo is discovered, but no real
+      # git tree or remote, so git and gh both degrade rather than reach a network.
+      repo = Path.join(tmp_dir, "behind_app")
+      File.mkdir_p!(Path.join(repo, "priv/repo/migrations"))
+      File.write!(Path.join(repo, ".git"), "gitdir: fake")
+
+      File.write!(
+        Path.join(repo, "mix.lock"),
+        ~s|  "defdo_tenant": {:hex, :defdo_tenant, "0.13.0", "h", [:mix], [], "hexpm:defdo", "h2"},\n|
+      )
+
+      write_migration(
+        Path.join(repo, "priv/repo/migrations"),
+        "20260101000000_wrapper.exs",
+        ~S|def up, do: Defdo.Tenant.Migrator.up(version: 3, prefix: "app")|
+      )
+
+      {response, _state} =
+        call(30, "defdo_saas.status", %{
+          "root" => tmp_dir,
+          "latest" => "0.13.0",
+          "fetch" => false
+        })
+
+      payload = decode_tool_payload(response)
+
+      assert payload["package"] == "defdo_tenant"
+      assert payload["latest"] == "0.13.0"
+      assert [repo_report] = payload["repos"]
+      assert repo_report["repo"] == "behind_app"
+      # migrator target resolved from the repo's own lock (0.13.0 -> v4)
+      assert repo_report["migrator"]["target"] == 4
+      assert repo_report["migrator"]["status"] == "behind"
+      # gh could not be asked here: not zero PRs, unknown.
+      assert repo_report["pull_requests"]["available"] == false
+      assert is_list(payload["summary"])
+    end
+
+    test "a root that does not exist is a structured error" do
+      {response, _state} =
+        call(31, "defdo_saas.status", %{"root" => "/nonexistent/defdo-estate"})
+
+      assert response["error"]["code"] == -32_002
+      assert response["error"]["message"] == "Estate root not found"
+      assert response["error"]["data"]["root"] == "/nonexistent/defdo-estate"
     end
   end
 end
