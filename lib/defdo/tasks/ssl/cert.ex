@@ -268,6 +268,166 @@ defmodule Defdo.Tasks.Ssl.Cert do
     end)
   end
 
+  # -- step-ca on-ramp (issue defdo #4, stage 2) -----------------------------
+
+  @default_ca_url "https://stepca.defdo.de"
+
+  @doc """
+  The step-ca URL used for the internal CA on-ramp.
+
+  Resolution order: the `:ca_url` option, then the `:defdo_tasks` config, then
+  the documented default (`#{@default_ca_url}`).
+
+  Note this is the *passthrough* TLS endpoint (`stepca.defdo.de`), which
+  presents the CA's own intermediate-signed leaf — the exact host the `step`
+  CLI must talk to. The public ACME endpoint (`ca.defdo.de`) terminates a
+  Let's Encrypt leaf and is only for cert-manager.
+  """
+  @spec step_ca_url(keyword()) :: String.t()
+  def step_ca_url(opts \\ []) do
+    opts[:ca_url] ||
+      Application.get_env(:defdo_tasks, :step_ca_url, @default_ca_url)
+  end
+
+  @doc """
+  The root CA fingerprint for `step ca bootstrap`.
+
+  Resolution order: the `:fingerprint` option, then the `:defdo_tasks` config.
+  The fingerprint is the SHA-256 of the CA's root certificate — public, not a
+  secret. It pins the trust anchor so the bootstrap cannot be man-in-the-middled.
+  """
+  @spec step_fingerprint(keyword()) :: String.t() | nil
+  def step_fingerprint(opts) do
+    opts[:fingerprint] || Application.get_env(:defdo_tasks, :step_fingerprint)
+  end
+
+  @doc """
+  The JWK provisioner name used to issue dev certs.
+
+  Defaults to `"Admin JWK"` — the admin provisioner created by `enableAdmin: true`
+  on the defdo CA. Use `--provisioner` to override once a dedicated dev
+  provisioner exists.
+  """
+  @spec step_provisioner(keyword()) :: String.t()
+  def step_provisioner(opts) do
+    opts[:provisioner] ||
+      Application.get_env(:defdo_tasks, :step_provisioner, "Admin JWK")
+  end
+
+  @doc """
+  The `step` CLI invocation for `step ca bootstrap`.
+
+  Returns `{cmd, args}`. The bootstrap writes the root cert + defaults.json into
+  STEPPATH (default `~/.step`), so a later `step ca certificate` against the same
+  STEPPATH trusts the CA. Idempotent: re-running re-saves the same material.
+  """
+  @spec step_bootstrap_cmd(keyword()) :: {String.t(), [String.t()]}
+  def step_bootstrap_cmd(opts) do
+    url = step_ca_url(opts)
+
+    args =
+      ["ca", "bootstrap", "--ca-url", url] ++
+        case step_fingerprint(opts) do
+          nil -> []
+          fp -> ["--fingerprint", fp]
+        end
+
+    {"step", args}
+  end
+
+  @doc """
+  The `step` CLI invocation for `step ca certificate`.
+
+  Returns `{cmd, args}`. Issues a leaf for `subject` plus the SANs in
+  `opts[:sans]`, using `opts[:provisioner]` and `opts[:password_file]`.
+  Writes `paths.cert` / `paths.key` (the `priv/ssl` pair from `cert_paths/2`).
+
+  The leaf lifetime defaults to `opts[:not_after]` (default `24h`) because the
+  CA's `Admin JWK` provisioner pins `defaultTLSCertDuration: 5m` — far too short
+  for a dev server. Override with `--not-after` (e.g. `7d`).
+  """
+  @spec step_certificate_cmd(String.t(), %{cert: String.t(), key: String.t()}, keyword()) ::
+          {String.t(), [String.t()]}
+  def step_certificate_cmd(subject, paths, opts) do
+    sans = Keyword.get(opts, :sans, [])
+    provisioner = step_provisioner(opts)
+    password_file = Keyword.fetch!(opts, :password_file)
+    not_after = opts[:not_after] || "24h"
+
+    args =
+      [
+        "ca",
+        "certificate",
+        "--provisioner",
+        provisioner,
+        "--provisioner-password-file",
+        password_file,
+        "--not-after",
+        not_after
+      ] ++
+        Enum.flat_map(sans, fn san -> ["--san", san] end) ++
+        [subject, paths.cert, paths.key]
+
+    {"step", args}
+  end
+
+  @doc """
+  Runs a `step` CLI invocation with the given STEPPATH.
+
+  `{cmd, args}` is the pair from `step_bootstrap_cmd/1` or
+  `step_certificate_cmd/3`. The default runner shells out with `STEPPATH`
+  exported. Injectable via `:runner` for tests.
+
+  Returns `{:ok, stdout}` or `{:error, {code, stderr}}`.
+  """
+  @spec step_run({String.t(), [String.t()]}, keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def step_run(cmds, opts \\ []) do
+    runner = Keyword.get(opts, :runner, &default_step_runner/2)
+    steppath = Keyword.get(opts, :steppath, default_steppath())
+
+    case runner.(cmds, steppath) do
+      {:ok, out} ->
+        {:ok, out}
+
+      {:error, {code, out}} ->
+        {:error, {:step_failed, elem(cmds, 0), code, String.slice(out, 0, 500)}}
+    end
+  end
+
+  defp default_step_runner({cmd, args}, steppath) do
+    env = [{"STEPPATH", steppath}]
+
+    case System.cmd(cmd, args, env: env, stderr_to_stdout: true) do
+      {out, 0} -> {:ok, out}
+      {out, code} -> {:error, {code, out}}
+    end
+  end
+
+  @doc "The default STEPPATH directory (`~/.step`)."
+  @spec default_steppath() :: String.t()
+  def default_steppath,
+    do: Path.join(System.user_home!(), ".step")
+
+  @doc """
+  Returns the root cert path inside `steppath`, or nil if not bootstrapped.
+
+  `step ca bootstrap` writes `<steppath>/certs/root_ca.crt`. Its presence is the
+  idempotence signal: re-running bootstrap against an existing STEPPATH prompts
+  interactively (needs a tty), so callers skip it when the root is present
+  unless `:force`.
+  """
+  @spec step_root_path(String.t()) :: String.t() | nil
+  def step_root_path(steppath) do
+    candidate = Path.join([steppath, "certs", "root_ca.crt"])
+
+    if File.exists?(candidate), do: candidate, else: nil
+  end
+
+  @doc "Bootstrap flags handed to `step ca bootstrap`."
+  @spec bootstrap_flags(keyword()) :: keyword()
+  def bootstrap_flags(opts), do: Keyword.take(opts, [:ca_url, :fingerprint])
+
   @doc """
   Downloads the mkcert binary at `url` to `dest`, returns `{:ok, dest}`.
 

@@ -279,6 +279,126 @@ defmodule Defdo.Tasks.Ssl.CertTest do
     end
   end
 
+  describe "step-ca on-ramp helpers" do
+    test "step_ca_url/1 resolves option, config, then default" do
+      assert Cert.step_ca_url(ca_url: "https://override.defdo") == "https://override.defdo"
+
+      assert Cert.step_ca_url([]) == "https://stepca.defdo.de"
+    end
+
+    test "step_fingerprint/1 takes option or config" do
+      assert Cert.step_fingerprint(fingerprint: "abc") == "abc"
+      assert Cert.step_fingerprint([]) == nil
+    end
+
+    test "step_provisioner/1 defaults to Admin JWK" do
+      assert Cert.step_provisioner([]) == "Admin JWK"
+      assert Cert.step_provisioner(provisioner: "Dev JWK") == "Dev JWK"
+    end
+
+    test "step_bootstrap_cmd/1 builds bootstrap invocation with fingerprint" do
+      {"step", args} =
+        Cert.step_bootstrap_cmd(
+          ca_url: "https://stepca.defdo.de",
+          fingerprint: "fp123"
+        )
+
+      assert args == [
+               "ca",
+               "bootstrap",
+               "--ca-url",
+               "https://stepca.defdo.de",
+               "--fingerprint",
+               "fp123"
+             ]
+    end
+
+    test "step_bootstrap_cmd/1 omits fingerprint when absent" do
+      {"step", args} = Cert.step_bootstrap_cmd(ca_url: "https://stepca.defdo.de")
+
+      assert args == ["ca", "bootstrap", "--ca-url", "https://stepca.defdo.de"]
+    end
+
+    test "step_certificate_cmd/3 builds issue invocation with SANs and pos args" do
+      paths = %{cert: "priv/ssl/my_app.pem", key: "priv/ssl/my_app_key.pem"}
+
+      {"step", args} =
+        Cert.step_certificate_cmd("my_app", paths,
+          provisioner: "Admin JWK",
+          password_file: "/tmp/pw",
+          sans: ["my_app", "localhost", "127.0.0.1"]
+        )
+
+      assert args == [
+               "ca",
+               "certificate",
+               "--provisioner",
+               "Admin JWK",
+               "--provisioner-password-file",
+               "/tmp/pw",
+               "--not-after",
+               "24h",
+               "--san",
+               "my_app",
+               "--san",
+               "localhost",
+               "--san",
+               "127.0.0.1",
+               "my_app",
+               "priv/ssl/my_app.pem",
+               "priv/ssl/my_app_key.pem"
+             ]
+    end
+
+    test "step_certificate_cmd/3 requires password_file" do
+      paths = %{cert: "c.pem", key: "k.pem"}
+
+      assert_raise KeyError, fn ->
+        Cert.step_certificate_cmd("my_app", paths, sans: ["localhost"])
+      end
+    end
+
+    test "step_root_path/1 returns nil when not bootstrapped" do
+      dir = Path.join(System.tmp_dir!(), "step_empty_#{System.unique_integer([:positive])}")
+
+      assert Cert.step_root_path(dir) == nil
+    end
+
+    test "step_root_path/1 returns root cert path when bootstrapped" do
+      dir = Path.join(System.tmp_dir!(), "step_root_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(Path.join(dir, "certs"))
+      root = Path.join([dir, "certs", "root_ca.crt"])
+      File.write!(root, "root")
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      assert Cert.step_root_path(dir) == root
+    end
+
+    test "step_run/2 surfaces runner errors uniformly" do
+      runner = fn _, _ -> {:error, {7, "boom"}} end
+
+      assert {:error, {:step_failed, "step", 7, "boom"}} =
+               Cert.step_run({"step", ["ca", "bootstrap"]}, runner: runner)
+    end
+
+    test "step_run/2 passes the resolved steppath to the runner" do
+      paths = Cert.cert_paths("my_app")
+
+      # pre-create root so bootstrap is skipped by the caller, but here we only
+      # assert the runner receives a steppath.
+      cert_cmd = Cert.step_certificate_cmd("my_app", paths, password_file: "pw")
+
+      runner = fn {cmd, _args}, steppath ->
+        send(self(), {:ran, cmd, steppath})
+        {:ok, "out"}
+      end
+
+      assert {:ok, "out"} = Cert.step_run(cert_cmd, steppath: "/tmp/sp", runner: runner)
+      assert_received {:ran, "step", "/tmp/sp"}
+    end
+  end
+
   defp count(haystack, needle) do
     haystack |> String.split(needle) |> length() |> Kernel.-(1)
   end
