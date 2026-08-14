@@ -353,7 +353,7 @@ defmodule Defdo.Tasks.Ssl.CertTest do
     test "step_certificate_cmd/3 requires password_file" do
       paths = %{cert: "c.pem", key: "k.pem"}
 
-      assert_raise KeyError, fn ->
+      assert_raise ArgumentError, ~r/needs a provisioner password file/, fn ->
         Cert.step_certificate_cmd("my_app", paths, sans: ["localhost"])
       end
     end

@@ -339,7 +339,8 @@ defmodule Defdo.Tasks.Ssl.Cert do
   The `step` CLI invocation for `step ca certificate`.
 
   Returns `{cmd, args}`. Issues a leaf for `subject` plus the SANs in
-  `opts[:sans]`, using `opts[:provisioner]` and `opts[:password_file]`.
+  `opts[:sans]`, using `opts[:provisioner]` and the provisioner password file
+  from `opts[:password_file]` or `config :defdo_tasks, :step_provisioner_password_file`.
   Writes `paths.cert` / `paths.key` (the `priv/ssl` pair from `cert_paths/2`).
 
   The leaf lifetime defaults to `opts[:not_after]` (default `24h`) because the
@@ -351,7 +352,16 @@ defmodule Defdo.Tasks.Ssl.Cert do
   def step_certificate_cmd(subject, paths, opts) do
     sans = Keyword.get(opts, :sans, [])
     provisioner = step_provisioner(opts)
-    password_file = Keyword.fetch!(opts, :password_file)
+
+    password_file =
+      opts[:password_file] || Application.get_env(:defdo_tasks, :step_provisioner_password_file)
+
+    if is_nil(password_file) do
+      raise ArgumentError,
+            "step mode needs a provisioner password file: pass --password-file or set " <>
+              "config :defdo_tasks, :step_provisioner_password_file"
+    end
+
     not_after = opts[:not_after] || "24h"
 
     args =

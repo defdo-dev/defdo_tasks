@@ -50,11 +50,31 @@ defmodule Mix.Tasks.Defdo.Ssl.Setup do
   intermediate-signed leaf. The public ACME endpoint (`ca.defdo.de`) terminates
   a Let's Encrypt leaf and is only for cert-manager.
 
-  The root is pinned by fingerprint:
+  Each host trusts the CA once (pins the root by fingerprint):
+
+      step ca bootstrap --ca-url https://stepca.defdo.de \
+        --fingerprint <root-sha256>
+
+  The fingerprint is the SHA-256 of the CA root — public, not a secret. The
+  root is saved into `~/.step`; after that the CA commands work without flags.
+  You can also set it via config so the task does it for you:
 
       config :defdo_tasks, :step_fingerprint, "<root-sha256>"
 
-  or `--fingerprint`. The fingerprint is the SHA-256 of the CA root — public.
+  Issuance uses the CA's admin provisioner (JWK, created by the CA's
+  `enableAdmin: true`). It needs the provisioner's password file — that IS a
+  secret, keep it out of git:
+
+      config :defdo_tasks, :step_provisioner_password_file, "~/.step/password"
+
+  or pass `--password-file`. The enrolled machine already has the root in
+  `~/.step`, so the task can issue a leaf end-to-end:
+
+      mix defdo.ssl.setup --mode step --password-file ~/.step/password
+
+  The leaf lifetime defaults to 24h (`--not-after`) because the admin provisioner
+  pins a very short default; extend with e.g. `--not-after 7d`.
+
   Override the CA URL with `--ca-url` or `config :defdo_tasks, :step_ca_url`.
   Override the provisioner with `--provisioner` (default `Admin JWK`).
   Override the STEPPATH with `--step-path` (default `~/.step`).
