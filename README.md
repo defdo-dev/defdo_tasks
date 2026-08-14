@@ -138,6 +138,11 @@ The fingerprint is public (SHA-256 of the CA root). The password file is a
 secret — keep it out of git. Both can be set via `config :defdo_tasks`
 (`:step_fingerprint`, `:step_provisioner`, `:step_ca_url`) or flags.
 
+CA leaves are short-lived — 24h by default, since the admin provisioner pins a
+5m default. Re-run the task to re-issue; it reads the certificate's expiry, not
+just whether the file is there, so an overnight expiry is caught instead of
+reported as "certs already exist".
+
 ## Verifying the generator
 
 The Igniter tasks are tested with `Igniter.Test` against in-memory projects. The

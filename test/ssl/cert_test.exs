@@ -313,10 +313,17 @@ defmodule Defdo.Tasks.Ssl.CertTest do
              ]
     end
 
-    test "step_bootstrap_cmd/1 omits fingerprint when absent" do
-      {"step", args} = Cert.step_bootstrap_cmd(ca_url: "https://stepca.defdo.de")
-
-      assert args == ["ca", "bootstrap", "--ca-url", "https://stepca.defdo.de"]
+    test "step_bootstrap_cmd/1 refuses to build a bootstrap with no fingerprint" do
+      # Not a style preference. The CLI rejects the invocation outright:
+      #
+      #   $ step ca bootstrap --ca-url https://stepca.defdo.de
+      #   'step ca bootstrap' requires the '--fingerprint' flag
+      #
+      # Building it anyway trades a message that names the config to set for an
+      # opaque {:step_failed, ...} tuple raised from the middle of the task.
+      assert_raise ArgumentError, ~r/needs the CA root fingerprint/, fn ->
+        Cert.step_bootstrap_cmd(ca_url: "https://stepca.defdo.de")
+      end
     end
 
     test "step_certificate_cmd/3 builds issue invocation with SANs and pos args" do
@@ -375,6 +382,59 @@ defmodule Defdo.Tasks.Ssl.CertTest do
       assert Cert.step_root_path(dir) == root
     end
 
+    test "step_certificate_cmd/3 expands a tilde in the password file" do
+      # The moduledoc recommends `config :defdo_tasks,
+      # :step_provisioner_password_file, "~/.step/password"`. System.cmd/3 is
+      # not a shell, so an unexpanded `~` reaches step as a literal directory
+      # name -- making the documented config the one form that fails.
+      paths = %{cert: "c.pem", key: "k.pem"}
+
+      {"step", args} =
+        Cert.step_certificate_cmd("my_app", paths, password_file: "~/.step/password")
+
+      password_file =
+        Enum.at(args, Enum.find_index(args, &(&1 == "--provisioner-password-file")) + 1)
+
+      refute String.starts_with?(password_file, "~")
+      assert password_file == Path.expand("~/.step/password")
+    end
+
+    test "cert_not_after/1 reads validity out of a real certificate" do
+      assert {:ok, %DateTime{} = not_after} = Cert.cert_not_after(fixture("long_lived.pem"))
+      assert not_after.year == 2126
+
+      # Certificates that expire before 2050 encode notAfter as ASN.1 utcTime
+      # (two-digit year); later ones use generalTime. Both fixtures are real
+      # step-issued certs, so both encodings are exercised.
+      assert {:ok, %DateTime{year: 2026}} = Cert.cert_not_after(fixture("expired.pem"))
+    end
+
+    test "cert_not_after/1 errors rather than raising on junk" do
+      path = Path.join(System.tmp_dir!(), "not_a_cert_#{System.unique_integer([:positive])}.pem")
+      File.write!(path, "definitely not a certificate")
+      on_exit(fn -> File.rm(path) end)
+
+      assert {:error, _} = Cert.cert_not_after(path)
+      assert {:error, _} = Cert.cert_not_after(Path.join(System.tmp_dir!(), "missing.pem"))
+    end
+
+    test "cert_fresh?/2 is what separates a 24h step leaf from a mkcert one" do
+      # The bug this closes: `File.exists?` says yes for a leaf that expired
+      # overnight, and the task answers "certs already exist; reusing" while the
+      # dev server serves something no browser accepts.
+      assert Cert.cert_fresh?(fixture("long_lived.pem"))
+      refute Cert.cert_fresh?(fixture("expired.pem"))
+
+      # An unreadable cert is spent, not trusted: re-issuing is cheap.
+      refute Cert.cert_fresh?(Path.join(System.tmp_dir!(), "missing.pem"))
+    end
+
+    test "cert_fresh?/2 honours the renewal window" do
+      # A cert valid for another century is still "not fresh" if you demand more
+      # than a century of remaining life -- the window is the whole knob.
+      refute Cert.cert_fresh?(fixture("long_lived.pem"), 4_000_000_000)
+    end
+
     test "step_run/2 surfaces runner errors uniformly" do
       runner = fn _, _ -> {:error, {7, "boom"}} end
 
@@ -398,6 +458,8 @@ defmodule Defdo.Tasks.Ssl.CertTest do
       assert_received {:ran, "step", "/tmp/sp"}
     end
   end
+
+  defp fixture(name), do: Path.join([__DIR__, "..", "fixtures", "ssl", name]) |> Path.expand()
 
   defp count(haystack, needle) do
     haystack |> String.split(needle) |> length() |> Kernel.-(1)

@@ -23,7 +23,12 @@ defmodule Mix.Tasks.Defdo.Ssl.Setup do
 
     1. Ensures the certs exist for `<project>` + `localhost` (mkcert) or issues
        them from the internal CA (step), writing `priv/ssl/<project>.pem` and
-       `priv/ssl/<project>_key.pem` (re-used unless `--force`).
+       `priv/ssl/<project>_key.pem`.
+
+       Existing certs are re-used unless `--force`. In step mode "existing"
+       also means *not expired*: a step leaf defaults to 24h, so unlike a
+       mkcert cert its presence on disk stops meaning it works. A leaf with
+       less than an hour left is re-issued rather than reported as fine.
     2. Injects an `https:` endpoint block into `config/dev.exs` and
        `config/runtime.exs`, delimited by marker comments so re-running updates
        the block in place instead of duplicating it, and never touches unrelated
@@ -73,7 +78,9 @@ defmodule Mix.Tasks.Defdo.Ssl.Setup do
       mix defdo.ssl.setup --mode step --password-file ~/.step/password
 
   The leaf lifetime defaults to 24h (`--not-after`) because the admin provisioner
-  pins a very short default; extend with e.g. `--not-after 7d`.
+  pins a very short default; extend with e.g. `--not-after 7d`. Re-running the
+  task after it expires re-issues — the reuse check reads the certificate's
+  `notAfter`, not just its presence.
 
   Override the CA URL with `--ca-url` or `config :defdo_tasks, :step_ca_url`.
   Override the provisioner with `--provisioner` (default `Admin JWK`).
@@ -109,6 +116,11 @@ defmodule Mix.Tasks.Defdo.Ssl.Setup do
   @dev_config "config/dev.exs"
   @runtime_config "config/runtime.exs"
   @gitignore ".gitignore"
+  @modes ~w(mkcert step)
+
+  # A step leaf inside this window is treated as spent rather than reused: an
+  # hour is long enough that a dev session started now does not expire mid-run.
+  @renew_before_seconds 3600
 
   @switches [
     mode: :string,
@@ -134,7 +146,7 @@ defmodule Mix.Tasks.Defdo.Ssl.Setup do
 
     if rest != [], do: Mix.raise("unexpected argument(s): #{Enum.join(rest, " ")}")
 
-    mode = opts[:mode] || "mkcert"
+    mode = validate_mode!(opts[:mode] || "mkcert")
 
     app = resolve_app(opts)
     project = Cert.validate_project_name!(opts[:project] || to_string(app))
@@ -156,52 +168,81 @@ defmodule Mix.Tasks.Defdo.Ssl.Setup do
 
   # -- certs ----------------------------------------------------------------
 
+  # A typo in --mode must not silently pick the other PKI. Without this, `--mode
+  # stpe` falls through to the mkcert branch and downloads a binary while the
+  # operator believes they are on the internal CA.
+  defp validate_mode!(mode) when mode in @modes, do: mode
+
+  defp validate_mode!(mode) do
+    Mix.raise("unknown --mode #{inspect(mode)}; expected one of: #{Enum.join(@modes, ", ")}")
+  end
+
   defp ensure_certs("step", project, paths, opts) do
     ensure_step_certs(project, paths, opts)
   end
 
-  defp ensure_certs(_mode, project, paths, opts) do
+  defp ensure_certs("mkcert", project, paths, opts) do
     ensure_mkcert_certs(project, paths, opts)
   end
 
   defp ensure_step_certs(project, paths, opts) do
-    if certs_present?(paths) and !opts[:force] do
+    if step_certs_usable?(paths) and !opts[:force] do
       Mix.shell().info("Certs already exist (#{paths.cert}); reusing. Pass --force to re-issue.")
     else
       steppath = opts[:step_path] || Cert.default_steppath()
 
-      if Cert.step_root_path(steppath) do
-        Mix.shell().info("step ca bootstrap: root already present in #{steppath}; skipping.")
-      else
-        case Cert.step_run(Cert.step_bootstrap_cmd(opts), steppath: steppath) do
-          {:ok, _out} ->
-            Mix.shell().info("step ca bootstrap: trusted defdo CA root.")
+      ensure_step_root(steppath, opts)
+      issue_step_cert(project, paths, opts, steppath)
+    end
+  end
 
-          {:error, reason} ->
-            Mix.raise("step ca bootstrap failed: #{inspect(reason)}")
-        end
-      end
+  # Presence is enough for mkcert, whose leaf lives for years. It is not enough
+  # for step: `--not-after` defaults to 24h, so tomorrow the files are still
+  # there and the cert is dead. Reusing on presence alone means the task reports
+  # "certs already exist" while the dev server serves an expired cert.
+  defp step_certs_usable?(paths) do
+    certs_present?(paths) and Cert.cert_fresh?(paths.cert, @renew_before_seconds)
+  end
 
-      sans = [project, "localhost", "127.0.0.1"]
-
-      File.mkdir_p!(Path.dirname(paths.cert))
-
-      if opts[:force] do
-        # `step ca certificate` prompts interactively when the output files already
-        # exist; remove them so a forced re-issue runs non-interactively.
-        File.rm(paths.cert)
-        File.rm(paths.key)
-      end
-
-      cert_cmd = Cert.step_certificate_cmd(project, paths, Keyword.put(opts, :sans, sans))
-
-      case Cert.step_run(cert_cmd, steppath: steppath) do
+  defp ensure_step_root(steppath, opts) do
+    if Cert.step_root_path(steppath) do
+      Mix.shell().info("step ca bootstrap: root already present in #{steppath}; skipping.")
+    else
+      case Cert.step_run(Cert.step_bootstrap_cmd(opts), steppath: steppath) do
         {:ok, _out} ->
-          Mix.shell().info("Issued cert for #{project} and localhost from the defdo CA.")
+          Mix.shell().info("step ca bootstrap: trusted defdo CA root.")
 
         {:error, reason} ->
-          Mix.raise("step ca certificate failed: #{inspect(reason)}")
+          Mix.raise("step ca bootstrap failed: #{inspect(reason)}")
       end
+    end
+  end
+
+  # Issued to siblings and moved into place on success. `step ca certificate`
+  # prompts interactively when its output files already exist, so a re-issue has
+  # to clear the way first -- and clearing the *real* pair means a failed
+  # issuance (expired provisioner password, CA unreachable) leaves the app with
+  # no certs at all while config/dev.exs still points at them.
+  defp issue_step_cert(project, paths, opts, steppath) do
+    staging = %{cert: paths.cert <> ".new", key: paths.key <> ".new"}
+
+    File.mkdir_p!(Path.dirname(paths.cert))
+    File.rm(staging.cert)
+    File.rm(staging.key)
+
+    sans = [project, "localhost", "127.0.0.1"]
+    cert_cmd = Cert.step_certificate_cmd(project, staging, Keyword.put(opts, :sans, sans))
+
+    case Cert.step_run(cert_cmd, steppath: steppath) do
+      {:ok, _out} ->
+        File.rename!(staging.cert, paths.cert)
+        File.rename!(staging.key, paths.key)
+        Mix.shell().info("Issued cert for #{project} and localhost from the defdo CA.")
+
+      {:error, reason} ->
+        File.rm(staging.cert)
+        File.rm(staging.key)
+        Mix.raise("step ca certificate failed: #{inspect(reason)}")
     end
   end
 

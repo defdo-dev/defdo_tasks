@@ -40,6 +40,26 @@ defmodule Defdo.Tasks.Ssl.Cert do
   macOS arm64/amd64 and linux amd64/arm64, with windows-amd64 for completeness.
   """
 
+  require Record
+
+  Record.defrecordp(
+    :otp_certificate,
+    :OTPCertificate,
+    Record.extract(:OTPCertificate, from_lib: "public_key/include/public_key.hrl")
+  )
+
+  Record.defrecordp(
+    :otp_tbs_certificate,
+    :OTPTBSCertificate,
+    Record.extract(:OTPTBSCertificate, from_lib: "public_key/include/public_key.hrl")
+  )
+
+  Record.defrecordp(
+    :validity,
+    :Validity,
+    Record.extract(:Validity, from_lib: "public_key/include/public_key.hrl")
+  )
+
   @default_base_url "https://storage.defdo.de/mkcert"
   # Upstream mkcert's latest tag. defdo's custom build number was not verified
   # when this was written; override with --version or :mkcert_version.
@@ -320,19 +340,28 @@ defmodule Defdo.Tasks.Ssl.Cert do
   Returns `{cmd, args}`. The bootstrap writes the root cert + defaults.json into
   STEPPATH (default `~/.step`), so a later `step ca certificate` against the same
   STEPPATH trusts the CA. Idempotent: re-running re-saves the same material.
+
+  Raises when no fingerprint resolves. The CLI requires the flag —
+
+      $ step ca bootstrap --ca-url https://stepca.defdo.de
+      'step ca bootstrap' requires the '--fingerprint' flag
+
+  — so omitting it does not produce an unpinned bootstrap, it produces a
+  command that dies 40 lines downstream wearing an opaque `:step_failed`
+  tuple. Refuse it here, where the message can name the config to set.
   """
   @spec step_bootstrap_cmd(keyword()) :: {String.t(), [String.t()]}
   def step_bootstrap_cmd(opts) do
     url = step_ca_url(opts)
 
-    args =
-      ["ca", "bootstrap", "--ca-url", url] ++
-        case step_fingerprint(opts) do
-          nil -> []
-          fp -> ["--fingerprint", fp]
-        end
+    fingerprint =
+      step_fingerprint(opts) ||
+        raise ArgumentError,
+              "step mode needs the CA root fingerprint: pass --fingerprint or set " <>
+                "config :defdo_tasks, :step_fingerprint. It is the SHA-256 of the CA " <>
+                "root -- public, not a secret -- and it is what pins the trust anchor."
 
-    {"step", args}
+    {"step", ["ca", "bootstrap", "--ca-url", url, "--fingerprint", fingerprint]}
   end
 
   @doc """
@@ -361,6 +390,12 @@ defmodule Defdo.Tasks.Ssl.Cert do
             "step mode needs a provisioner password file: pass --password-file or set " <>
               "config :defdo_tasks, :step_provisioner_password_file"
     end
+
+    # Expanded, because the documented config value is `"~/.step/password"` and
+    # `System.cmd/3` is not a shell: it hands `~` to step verbatim and step
+    # reports a missing file. On the flag path the shell already expanded it,
+    # so the one form the docs recommend was the only one that failed.
+    password_file = Path.expand(password_file)
 
     not_after = opts[:not_after] || "24h"
 
@@ -394,7 +429,7 @@ defmodule Defdo.Tasks.Ssl.Cert do
           {:ok, String.t()} | {:error, term()}
   def step_run(cmds, opts \\ []) do
     runner = Keyword.get(opts, :runner, &default_step_runner/2)
-    steppath = Keyword.get(opts, :steppath, default_steppath())
+    steppath = opts |> Keyword.get(:steppath, default_steppath()) |> Path.expand()
 
     case runner.(cmds, steppath) do
       {:ok, out} ->
@@ -434,9 +469,74 @@ defmodule Defdo.Tasks.Ssl.Cert do
     if File.exists?(candidate), do: candidate, else: nil
   end
 
-  @doc "Bootstrap flags handed to `step ca bootstrap`."
-  @spec bootstrap_flags(keyword()) :: keyword()
-  def bootstrap_flags(opts), do: Keyword.take(opts, [:ca_url, :fingerprint])
+  @doc """
+  The `notAfter` of the certificate at `path`, as a `DateTime`.
+
+  Read with `:public_key` rather than by shelling out, so the freshness check
+  works on a machine that has certs but no `step` on PATH.
+  """
+  @spec cert_not_after(String.t()) :: {:ok, DateTime.t()} | {:error, term()}
+  def cert_not_after(path) do
+    with {:ok, pem} <- File.read(path),
+         [{:Certificate, der, _} | _] <- :public_key.pem_decode(pem) do
+      otp_certificate(tbsCertificate: tbs) = :public_key.pkix_decode_cert(der, :otp)
+      otp_tbs_certificate(validity: validity(notAfter: not_after)) = tbs
+
+      asn1_to_datetime(not_after)
+    else
+      {:error, reason} -> {:error, reason}
+      [] -> {:error, :no_certificate_in_pem}
+      other -> {:error, {:unexpected_pem, other}}
+    end
+  rescue
+    error -> {:error, error}
+  end
+
+  @doc """
+  Is the cert at `path` still good for at least `renew_before` seconds?
+
+  This is what separates the two backends. A mkcert leaf lives for years, so
+  "the file is there" and "the cert works" are the same question. A step leaf
+  defaults to 24h: tomorrow the file is still there, the cert is expired, and
+  a presence-only check answers "certs already exist, reusing" while the dev
+  server serves something no browser will accept.
+
+  An unreadable or unparseable cert answers `false` — re-issuing a cert we
+  cannot read is cheap, trusting one we cannot read is not.
+  """
+  @spec cert_fresh?(String.t(), non_neg_integer()) :: boolean()
+  def cert_fresh?(path, renew_before \\ 3600) do
+    case cert_not_after(path) do
+      {:ok, not_after} ->
+        DateTime.diff(not_after, DateTime.utc_now()) > renew_before
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp asn1_to_datetime({:utcTime, charlist}) do
+    # RFC 5280: two-digit years, 00-49 => 20xx, 50-99 => 19xx.
+    <<yy::binary-2, rest::binary>> = to_string(charlist)
+    year = String.to_integer(yy)
+    century = if year < 50, do: "20", else: "19"
+
+    parse_asn1_stamp(century <> yy <> rest)
+  end
+
+  defp asn1_to_datetime({:generalTime, charlist}), do: parse_asn1_stamp(to_string(charlist))
+  defp asn1_to_datetime(other), do: {:error, {:unexpected_time, other}}
+
+  defp parse_asn1_stamp(
+         <<y::binary-4, mo::binary-2, d::binary-2, h::binary-2, mi::binary-2, s::binary-2, "Z">>
+       ) do
+    DateTime.new(
+      Date.new!(String.to_integer(y), String.to_integer(mo), String.to_integer(d)),
+      Time.new!(String.to_integer(h), String.to_integer(mi), String.to_integer(s))
+    )
+  end
+
+  defp parse_asn1_stamp(other), do: {:error, {:unexpected_time, other}}
 
   @doc """
   Downloads the mkcert binary at `url` to `dest`, returns `{:ok, dest}`.
