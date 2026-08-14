@@ -112,6 +112,37 @@ two service-client shapes that look like one problem:
 One client cannot satisfy both. Asking for the wrong role is a thing this
 module makes loud.
 
+## Local dev HTTPS
+
+```
+mix defdo.ssl.setup                       # mkcert (per-machine root)
+mix defdo.ssl.setup --mode step           # internal defdo CA (shared PKI)
+```
+
+`--mode step` on-ramps to the internal CA: `step ca bootstrap` pins the CA root
+by fingerprint, then `step ca certificate` issues a leaf signed by the CA's
+intermediate for `<project>` + `localhost`. Same UX as mkcert, but the root is
+the estate's real CA instead of a per-machine one — so a cert issued here is
+trusted by any host that trusts the defdo CA.
+
+Requires the `step` CLI, the CA root fingerprint, and the CA provisioner
+password (the `Admin JWK` provisioner created by `enableAdmin: true`):
+
+```
+mix defdo.ssl.setup --mode step \
+  --fingerprint <root-sha256> \
+  --password-file ~/.step/provisioner-password
+```
+
+The fingerprint is public (SHA-256 of the CA root). The password file is a
+secret — keep it out of git. Both can be set via `config :defdo_tasks`
+(`:step_fingerprint`, `:step_provisioner`, `:step_ca_url`) or flags.
+
+CA leaves are short-lived — 24h by default, since the admin provisioner pins a
+5m default. Re-run the task to re-issue; it reads the certificate's expiry, not
+just whether the file is there, so an overnight expiry is caught instead of
+reported as "certs already exist".
+
 ## Verifying the generator
 
 The Igniter tasks are tested with `Igniter.Test` against in-memory projects. The

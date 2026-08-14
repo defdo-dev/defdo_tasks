@@ -279,6 +279,188 @@ defmodule Defdo.Tasks.Ssl.CertTest do
     end
   end
 
+  describe "step-ca on-ramp helpers" do
+    test "step_ca_url/1 resolves option, config, then default" do
+      assert Cert.step_ca_url(ca_url: "https://override.defdo") == "https://override.defdo"
+
+      assert Cert.step_ca_url([]) == "https://stepca.defdo.de"
+    end
+
+    test "step_fingerprint/1 takes option or config" do
+      assert Cert.step_fingerprint(fingerprint: "abc") == "abc"
+      assert Cert.step_fingerprint([]) == nil
+    end
+
+    test "step_provisioner/1 defaults to Admin JWK" do
+      assert Cert.step_provisioner([]) == "Admin JWK"
+      assert Cert.step_provisioner(provisioner: "Dev JWK") == "Dev JWK"
+    end
+
+    test "step_bootstrap_cmd/1 builds bootstrap invocation with fingerprint" do
+      {"step", args} =
+        Cert.step_bootstrap_cmd(
+          ca_url: "https://stepca.defdo.de",
+          fingerprint: "fp123"
+        )
+
+      assert args == [
+               "ca",
+               "bootstrap",
+               "--ca-url",
+               "https://stepca.defdo.de",
+               "--fingerprint",
+               "fp123"
+             ]
+    end
+
+    test "step_bootstrap_cmd/1 refuses to build a bootstrap with no fingerprint" do
+      # Not a style preference. The CLI rejects the invocation outright:
+      #
+      #   $ step ca bootstrap --ca-url https://stepca.defdo.de
+      #   'step ca bootstrap' requires the '--fingerprint' flag
+      #
+      # Building it anyway trades a message that names the config to set for an
+      # opaque {:step_failed, ...} tuple raised from the middle of the task.
+      assert_raise ArgumentError, ~r/needs the CA root fingerprint/, fn ->
+        Cert.step_bootstrap_cmd(ca_url: "https://stepca.defdo.de")
+      end
+    end
+
+    test "step_certificate_cmd/3 builds issue invocation with SANs and pos args" do
+      paths = %{cert: "priv/ssl/my_app.pem", key: "priv/ssl/my_app_key.pem"}
+
+      {"step", args} =
+        Cert.step_certificate_cmd("my_app", paths,
+          provisioner: "Admin JWK",
+          password_file: "/tmp/pw",
+          sans: ["my_app", "localhost", "127.0.0.1"]
+        )
+
+      assert args == [
+               "ca",
+               "certificate",
+               "--provisioner",
+               "Admin JWK",
+               "--provisioner-password-file",
+               "/tmp/pw",
+               "--not-after",
+               "24h",
+               "--san",
+               "my_app",
+               "--san",
+               "localhost",
+               "--san",
+               "127.0.0.1",
+               "my_app",
+               "priv/ssl/my_app.pem",
+               "priv/ssl/my_app_key.pem"
+             ]
+    end
+
+    test "step_certificate_cmd/3 requires password_file" do
+      paths = %{cert: "c.pem", key: "k.pem"}
+
+      assert_raise ArgumentError, ~r/needs a provisioner password file/, fn ->
+        Cert.step_certificate_cmd("my_app", paths, sans: ["localhost"])
+      end
+    end
+
+    test "step_root_path/1 returns nil when not bootstrapped" do
+      dir = Path.join(System.tmp_dir!(), "step_empty_#{System.unique_integer([:positive])}")
+
+      assert Cert.step_root_path(dir) == nil
+    end
+
+    test "step_root_path/1 returns root cert path when bootstrapped" do
+      dir = Path.join(System.tmp_dir!(), "step_root_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(Path.join(dir, "certs"))
+      root = Path.join([dir, "certs", "root_ca.crt"])
+      File.write!(root, "root")
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      assert Cert.step_root_path(dir) == root
+    end
+
+    test "step_certificate_cmd/3 expands a tilde in the password file" do
+      # The moduledoc recommends `config :defdo_tasks,
+      # :step_provisioner_password_file, "~/.step/password"`. System.cmd/3 is
+      # not a shell, so an unexpanded `~` reaches step as a literal directory
+      # name -- making the documented config the one form that fails.
+      paths = %{cert: "c.pem", key: "k.pem"}
+
+      {"step", args} =
+        Cert.step_certificate_cmd("my_app", paths, password_file: "~/.step/password")
+
+      password_file =
+        Enum.at(args, Enum.find_index(args, &(&1 == "--provisioner-password-file")) + 1)
+
+      refute String.starts_with?(password_file, "~")
+      assert password_file == Path.expand("~/.step/password")
+    end
+
+    test "cert_not_after/1 reads validity out of a real certificate" do
+      assert {:ok, %DateTime{} = not_after} = Cert.cert_not_after(fixture("long_lived.pem"))
+      assert not_after.year == 2126
+
+      # Certificates that expire before 2050 encode notAfter as ASN.1 utcTime
+      # (two-digit year); later ones use generalTime. Both fixtures are real
+      # step-issued certs, so both encodings are exercised.
+      assert {:ok, %DateTime{year: 2026}} = Cert.cert_not_after(fixture("expired.pem"))
+    end
+
+    test "cert_not_after/1 errors rather than raising on junk" do
+      path = Path.join(System.tmp_dir!(), "not_a_cert_#{System.unique_integer([:positive])}.pem")
+      File.write!(path, "definitely not a certificate")
+      on_exit(fn -> File.rm(path) end)
+
+      assert {:error, _} = Cert.cert_not_after(path)
+      assert {:error, _} = Cert.cert_not_after(Path.join(System.tmp_dir!(), "missing.pem"))
+    end
+
+    test "cert_fresh?/2 is what separates a 24h step leaf from a mkcert one" do
+      # The bug this closes: `File.exists?` says yes for a leaf that expired
+      # overnight, and the task answers "certs already exist; reusing" while the
+      # dev server serves something no browser accepts.
+      assert Cert.cert_fresh?(fixture("long_lived.pem"))
+      refute Cert.cert_fresh?(fixture("expired.pem"))
+
+      # An unreadable cert is spent, not trusted: re-issuing is cheap.
+      refute Cert.cert_fresh?(Path.join(System.tmp_dir!(), "missing.pem"))
+    end
+
+    test "cert_fresh?/2 honours the renewal window" do
+      # A cert valid for another century is still "not fresh" if you demand more
+      # than a century of remaining life -- the window is the whole knob.
+      refute Cert.cert_fresh?(fixture("long_lived.pem"), 4_000_000_000)
+    end
+
+    test "step_run/2 surfaces runner errors uniformly" do
+      runner = fn _, _ -> {:error, {7, "boom"}} end
+
+      assert {:error, {:step_failed, "step", 7, "boom"}} =
+               Cert.step_run({"step", ["ca", "bootstrap"]}, runner: runner)
+    end
+
+    test "step_run/2 passes the resolved steppath to the runner" do
+      paths = Cert.cert_paths("my_app")
+
+      # pre-create root so bootstrap is skipped by the caller, but here we only
+      # assert the runner receives a steppath.
+      cert_cmd = Cert.step_certificate_cmd("my_app", paths, password_file: "pw")
+
+      runner = fn {cmd, _args}, steppath ->
+        send(self(), {:ran, cmd, steppath})
+        {:ok, "out"}
+      end
+
+      assert {:ok, "out"} = Cert.step_run(cert_cmd, steppath: "/tmp/sp", runner: runner)
+      assert_received {:ran, "step", "/tmp/sp"}
+    end
+  end
+
+  defp fixture(name), do: Path.join([__DIR__, "..", "fixtures", "ssl", name]) |> Path.expand()
+
   defp count(haystack, needle) do
     haystack |> String.split(needle) |> length() |> Kernel.-(1)
   end
