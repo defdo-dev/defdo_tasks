@@ -34,6 +34,76 @@
   claims `current` against a guessed number — it reports `unknown` with a
   reason.
 
+# 0.4.0
+
+Two things that were each reporting a false answer: the doctor about version
+drift, the SSL task about whether your certificate still works.
+
+## Added
+
+- `mix defdo.ssl.setup --mode step` — the on-ramp to the internal defdo CA.
+  `step ca bootstrap` pins the CA root by fingerprint, then `step ca
+  certificate` issues a leaf signed by the CA intermediate for `<project>` +
+  `localhost` + `127.0.0.1`. Same UX as the mkcert mode, but the trust anchor
+  is the estate's real CA instead of a per-machine root, so a cert issued here
+  is trusted by anything that trusts the defdo CA.
+
+  Needs the `step` CLI, the CA root fingerprint (public — SHA-256 of the root)
+  and the provisioner password file (a secret; keep it out of git). Set them
+  with `--fingerprint` / `--password-file` or `config :defdo_tasks`
+  (`:step_fingerprint`, `:step_provisioner_password_file`, `:step_ca_url`,
+  `:step_provisioner`).
+
+  ACME is not an option for this: HTTP-01 needs a public domain and cannot
+  challenge `localhost`. The CA admin JWK provisioner is the correct dev path.
+- `Defdo.Tasks.Ssl.Cert.cert_not_after/1` and `cert_fresh?/2` — read a
+  certificate's expiry with `:public_key`, no subprocess, so the check works on
+  a machine that has certs but no `step` on PATH.
+- `Defdo.Tasks.Saas.HexBaseline` — resolves each stack package's currently
+  published version from the private `defdo` Hex organization via
+  `mix hex.info`, reusing the org auth CI already has rather than adding a
+  secret.
+
+## Fixed
+
+- `mix defdo.saas.doctor` recommended downgrades. `check_deps` compared an
+  app's declared requirement against this package's own hardcoded `Stack`
+  requirement, which goes stale as soon as the estate ships a release this
+  source was never updated to know about — and then the comparison runs
+  backwards. `defdo_checkout`, on current `defdo_tenant` 0.13 and `defdo_vault`
+  0.11, was told it was "pinned behind the stack" and offered a fix that would
+  have moved it to versions its migrator wrapper was never generated against:
+  the same shape as the `column t0.deleted_at does not exist` failure that
+  already hit three apps.
+
+  The baseline is now the live Hex release, and the comparison asks the right
+  question — does this requirement admit what is published? A requirement whose
+  floor is *newer* than Hex is reported as a note, not a warning.
+
+  With no org auth the check degrades to notes and says nothing rather than
+  falling back to a hardcoded number. Note for pipelines: without
+  `hex_org_token` the version-pin check is a silent no-op.
+- `mix defdo.ssl.setup --mode step` reported an expired certificate as fine.
+  Reuse was decided by `File.exists?`, which is the right question for a mkcert
+  leaf that lives for years and the wrong one for a step leaf that defaults to
+  24h: the next morning the files are there, the certificate is dead, and the
+  task answered "Certs already exist; reusing" while the dev server served
+  something no browser accepts. Reuse now reads `notAfter`, and a leaf within
+  an hour of expiry is re-issued.
+- `config :defdo_tasks, :step_provisioner_password_file, "~/.step/password"` —
+  the form the documentation recommends — could not work. `System.cmd/3` is not
+  a shell, so the tilde reached `step` verbatim. It went unnoticed because the
+  `--password-file` flag path had already been expanded by the shell.
+- `step ca bootstrap` was built with no `--fingerprint` when none resolved. The
+  CLI rejects that outright, so it produced an opaque failure downstream rather
+  than an unpinned bootstrap. It now raises where the message can name the
+  config to set.
+- `--mode` was unvalidated: a typo silently selected mkcert while the operator
+  believed they were on the internal CA.
+- A forced re-issue deleted the existing cert and key before calling `step`, so
+  a failure left the app with no certificate while `config/dev.exs` still
+  pointed at one. Issuance now writes siblings and renames on success.
+
 # 0.2.0
 
 First release since 2024-08-10. Adopts Igniter and turns this package into the

@@ -2,7 +2,7 @@ defmodule Defdo.Tasks.MixProject do
   use Mix.Project
 
   @organization "defdo"
-  @version "0.3.0"
+  @version "0.4.0"
   @source_url "https://github.com/defdo-dev/defdo_tasks"
 
   def project do
