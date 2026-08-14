@@ -128,19 +128,85 @@ defmodule Defdo.Tasks.Saas.AuditTest do
       assert Audit.check_deps(deps) |> errors() == []
     end
 
-    test "a frozen requirement is a warning, and names the widening" do
+    test "a requirement that cannot admit the current Hex release is a warning" do
       deps = [
-        {:defdo_tenant, "~> 0.8.4", organization: :defdo},
+        {:defdo_tenant, "~> 0.10.5", organization: :defdo},
         {:defdo_tenant_plug, "~> 0.2"},
         {:defdo_tenant_boundary, "~> 0.2"},
-        {:defdo_vault, "~> 0.10"}
+        {:defdo_vault, "~> 0.10"},
+        {:defdo_payments, "~> 0.3"}
       ]
 
+      hex_baseline = %{defdo_tenant: {:ok, Version.parse!("0.13.0")}}
+
       assert [finding] =
-               deps |> Audit.check_deps() |> Enum.filter(&(&1.severity == :warning))
+               deps |> Audit.check_deps(hex_baseline) |> Enum.filter(&(&1.severity == :warning))
 
       assert finding.message =~ "pinned behind the stack"
-      assert finding.remedy == "widen to ~> 0.12"
+      assert finding.message =~ "0.13.0"
+      assert finding.remedy == "widen to ~> 0.13"
+    end
+
+    test "a requirement ahead of the current Hex release is a note, not a warning" do
+      # This is the bug made visible: the app ships defdo_tenant 0.13, the
+      # doctor's own (now-live) baseline has only seen 0.12 published. The
+      # app is ahead, not "pinned behind the stack" -- so this must never be
+      # a warning, let alone one recommending a downgrade.
+      deps = [
+        {:defdo_tenant, "~> 0.13", organization: :defdo},
+        {:defdo_tenant_plug, "~> 0.2"},
+        {:defdo_tenant_boundary, "~> 0.2"},
+        {:defdo_vault, "~> 0.10"},
+        {:defdo_payments, "~> 0.3"}
+      ]
+
+      hex_baseline = %{defdo_tenant: {:ok, Version.parse!("0.12.0")}}
+
+      findings = Audit.check_deps(deps, hex_baseline)
+
+      refute Enum.any?(findings, &(&1.severity == :warning))
+
+      assert [finding] =
+               Enum.filter(findings, &(&1.check == :stack_deps and &1.severity == :info))
+
+      assert finding.message =~ "ahead of what Hex has published"
+    end
+
+    test "an unresolved baseline entry is a note, and asserts nothing about the pin" do
+      deps = [
+        {:defdo_tenant, "~> 0.13", organization: :defdo},
+        {:defdo_tenant_plug, "~> 0.2"},
+        {:defdo_tenant_boundary, "~> 0.2"},
+        {:defdo_vault, "~> 0.10"},
+        {:defdo_payments, "~> 0.3"}
+      ]
+
+      hex_baseline = %{defdo_tenant: {:error, :timeout}}
+
+      findings = Audit.check_deps(deps, hex_baseline)
+
+      refute Enum.any?(findings, &(&1.severity in [:warning, :error]))
+
+      assert [finding] =
+               Enum.filter(findings, &(&1.check == :stack_deps and &1.severity == :info))
+
+      assert finding.message =~ "could not resolve"
+      assert finding.message =~ "defdo_tenant"
+    end
+
+    test "a package absent from the baseline map is silently out of scope" do
+      # No `:hex_baseline` entry at all (the default `%{}`) must not produce
+      # a finding of its own -- that is reserved for a resolution that was
+      # actually attempted and failed.
+      deps = [
+        {:defdo_tenant, "~> 0.13", organization: :defdo},
+        {:defdo_tenant_plug, "~> 0.2"},
+        {:defdo_tenant_boundary, "~> 0.2"},
+        {:defdo_vault, "~> 0.10"},
+        {:defdo_payments, "~> 0.3"}
+      ]
+
+      assert Audit.check_deps(deps) == []
     end
 
     test "handles every dep tuple shape mix.exs allows" do

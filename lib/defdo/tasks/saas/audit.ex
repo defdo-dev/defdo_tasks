@@ -33,6 +33,13 @@ defmodule Defdo.Tasks.Saas.Audit do
     * `:deps` — the project's dep list, as `Mix.Project.config()[:deps]` returns it
     * `:config_path` — defaults to `config` under `root`
     * `:oauth` — a client attrs map to validate, plus `:oauth_role`
+    * `:hex_baseline` — a `Defdo.Tasks.Saas.HexBaseline.resolve_all/2` result,
+      pre-resolved by the caller. Defaults to `%{}` (no live baseline), which
+      is deliberate: this function does no network I/O of its own, so a
+      package absent from the map is treated as "not part of this run" rather
+      than "unresolved", and `check_deps/2` stays silent about its version
+      pin. `mix defdo.saas.doctor` is what resolves the real map and passes
+      it in.
   """
   @spec run(String.t(), keyword()) :: [finding()]
   def run(root \\ ".", opts \\ []) do
@@ -42,7 +49,7 @@ defmodule Defdo.Tasks.Saas.Audit do
     config_path = Keyword.get(opts, :config_path, Path.join(root, "config"))
 
     check_migrator_chain(migrations_path) ++
-      check_deps(Keyword.get(opts, :deps, [])) ++
+      check_deps(Keyword.get(opts, :deps, []), Keyword.get(opts, :hex_baseline, %{})) ++
       check_compiled_config(config_path) ++
       check_oauth(Keyword.get(opts, :oauth), Keyword.get(opts, :oauth_role, :instance_service))
   end
@@ -166,11 +173,22 @@ defmodule Defdo.Tasks.Saas.Audit do
   end
 
   @doc """
-  Are the stack dependencies present, and can their requirements still admit the
-  version the stack targets?
+  Are the stack dependencies present, and can their requirements still admit
+  the version currently published to Hex?
+
+  `hex_baseline` is a `Defdo.Tasks.Saas.HexBaseline.resolve_all/2` result (or
+  a hand-built map shaped like one, for tests): `name => {:ok, %Version{}} |
+  {:error, reason}`. A name absent from the map is treated as out of scope
+  for this run and produces no version-pin finding at all -- only an entry
+  that was actually attempted and failed produces the "could not resolve"
+  note. This is what keeps a network outage from ever turning into a false
+  "pinned behind the stack" warning: without a live number to compare
+  against, the check says nothing rather than falling back to a hardcoded
+  one.
   """
-  @spec check_deps(list()) :: [finding()]
-  def check_deps(deps) when is_list(deps) do
+  @spec check_deps(list(), %{atom() => Defdo.Tasks.Saas.HexBaseline.resolution()}) ::
+          [finding()]
+  def check_deps(deps, hex_baseline \\ %{}) when is_list(deps) and is_map(hex_baseline) do
     declared = Map.new(deps, &normalize_dep/1)
 
     Enum.flat_map(Stack.select(), fn dep ->
@@ -197,31 +215,72 @@ defmodule Defdo.Tasks.Saas.Audit do
           []
 
         {:ok, requirement} ->
-          case Stack.check_requirement(dep.name, requirement) do
-            :ok ->
-              []
-
-            {:stale, expected} ->
-              [
-                warning(
-                  :stack_deps,
-                  "`#{dep.name}` is declared as `#{requirement}`, which cannot admit " <>
-                    "#{expected}. The app is pinned behind the stack.",
-                  "widen to #{expected}"
-                )
-              ]
-
-            {:invalid, requirement} ->
-              [
-                warning(
-                  :stack_deps,
-                  "`#{dep.name}` has an unparseable requirement `#{requirement}`"
-                )
-              ]
-          end
+          version_pin_findings(dep, requirement, hex_baseline)
       end
     end)
   end
+
+  defp version_pin_findings(dep, requirement, hex_baseline) do
+    case Map.fetch(hex_baseline, dep.name) do
+      :error ->
+        []
+
+      {:ok, {:error, reason}} ->
+        [
+          info(
+            :stack_deps,
+            "could not resolve the current `#{dep.name}` release from Hex " <>
+              "(#{format_reason(reason)}); skipping the version-pin check for this run."
+          )
+        ]
+
+      {:ok, {:ok, current}} ->
+        case Stack.compare_to_baseline(requirement, current) do
+          :ok ->
+            []
+
+          {:behind, current} ->
+            [
+              warning(
+                :stack_deps,
+                "`#{dep.name}` is declared as `#{requirement}`, which cannot admit the " <>
+                  "current release #{current}. The app is pinned behind the stack.",
+                "widen to #{widen_hint(current)}"
+              )
+            ]
+
+          {:ahead, floor} ->
+            [
+              info(
+                :stack_deps,
+                "`#{dep.name}` is declared as `#{requirement}` (floor #{floor}), which is " <>
+                  "newer than the current Hex release #{current}. Not a problem -- the app " <>
+                  "is ahead of what Hex has published, not behind it."
+              )
+            ]
+
+          {:invalid, requirement} ->
+            [
+              warning(
+                :stack_deps,
+                "`#{dep.name}` has an unparseable requirement `#{requirement}`"
+              )
+            ]
+        end
+    end
+  end
+
+  defp widen_hint(version) do
+    case Version.parse(version) do
+      {:ok, %Version{major: major, minor: minor}} -> "~> #{major}.#{minor}"
+      :error -> "a requirement that admits #{version}"
+    end
+  end
+
+  defp format_reason(:timeout), do: "timed out"
+  defp format_reason({:exit, status, message}), do: "exit #{status}: #{message}"
+  defp format_reason(reason) when is_binary(reason), do: reason
+  defp format_reason(reason), do: inspect(reason)
 
   defp normalize_dep({name, requirement}) when is_binary(requirement), do: {name, requirement}
 
