@@ -1,6 +1,10 @@
 ---
-# Hex publish pipeline — publishes defdo_tasks to the private `defdo` Hex
-# organization on tag push.
+# defdo_tasks Woodpecker Release — publishes to the private `defdo` Hex
+# organization on tag push (companion to .woodpecker/ci.yml, which is the
+# push/pull_request/manual/cron path).
+#
+# hex-publish no longer re-runs `mix deps.get` — validate already fetched
+# deps in this same workflow, and the shared workspace carries them forward.
 #
 # Secrets (global Woodpecker secrets, available on `tag` events):
 #   hex_api_key     — Hex user API key with publish rights on the defdo org
@@ -95,8 +99,6 @@ steps:
         if [ -n "$HEX_ORG_TOKEN" ]; then
           mix hex.organization auth "$HEX_ORG_NAME" --key "$HEX_ORG_TOKEN"
         fi
-
-        mix deps.get
 
         # CI_COMMIT_TAG is already validated bare (no `v` prefix) and matched
         # against mix.exs @version by the `validate` step this depends on.
