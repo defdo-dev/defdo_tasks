@@ -46,32 +46,38 @@ defmodule Defdo.Tasks.Saas.StackTest do
     end
   end
 
-  describe "check_requirement/2" do
+  describe "compare_to_baseline/2" do
     test "a two-part requirement admits later minors, which is the point" do
-      # `~> 0.10` means `>= 0.10.0 and < 1.0.0`. Every app in this estate that
-      # declares it can already resolve defdo_tenant 0.12 -- which is why so
-      # many of them are exposed to the v4 gap rather than protected from it.
-      assert Stack.check_requirement(:defdo_tenant, "~> 0.10") == :ok
-      assert Stack.check_requirement(:defdo_tenant, "~> 0.11") == :ok
-      assert Stack.check_requirement(:defdo_tenant, "~> 0.12") == :ok
+      # `~> 0.12` means `>= 0.12.0 and < 1.0.0`. An app declaring this can
+      # already admit whatever 0.x Hex currently ships.
+      assert Stack.compare_to_baseline("~> 0.12", "0.13.0") == :ok
+      assert Stack.compare_to_baseline("~> 0.10", "0.13.0") == :ok
     end
 
-    test "a three-part requirement is a freeze, and is reported as stale" do
-      # defdo_shop declares `~> 0.8.4`, which cannot admit 0.9.0 at all.
-      assert Stack.check_requirement(:defdo_tenant, "~> 0.8.4") == {:stale, "~> 0.12"}
+    test "a three-part requirement that has been outpaced is reported as behind" do
+      # A patch-level pin like `~> 0.13.0` cannot admit `0.15.0` at all --
+      # this is the freeze that quietly held defdo_shop back.
+      assert Stack.compare_to_baseline("~> 0.13.0", "0.15.0") == {:behind, "0.15.0"}
     end
 
-    test "an or-requirement is satisfied if either branch admits the floor" do
-      assert Stack.check_requirement(:defdo_tenant, "~> 0.10.2 or ~> 0.11") == :ok
+    test "a requirement newer than the current release is ahead, not behind" do
+      # This is the direction the old hardcoded-baseline comparison got
+      # backwards: an app declaring `~> 0.13` while Hex has only published up
+      # to `0.12.x` is not "pinned behind the stack" -- if anything the
+      # baseline is behind the app.
+      assert Stack.compare_to_baseline("~> 0.13", "0.12.0") == {:ahead, "0.13.0"}
     end
 
-    test "packages outside the stack are not this module's business" do
-      assert Stack.check_requirement(:phoenix, "~> 1.0.0") == :ok
+    test "an or-requirement is satisfied if either branch admits the release" do
+      assert Stack.compare_to_baseline("~> 0.10.2 or ~> 0.11", "0.11.5") == :ok
     end
 
     test "an unparseable requirement is reported, not swallowed" do
-      assert {:invalid, "not a version"} =
-               Stack.check_requirement(:defdo_tenant, "not a version")
+      assert Stack.compare_to_baseline("not a version", "0.13.0") == {:invalid, "not a version"}
+    end
+
+    test "accepts the current release as either a string or a parsed Version" do
+      assert Stack.compare_to_baseline("~> 0.12", Version.parse!("0.13.0")) == :ok
     end
   end
 end

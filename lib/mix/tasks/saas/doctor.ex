@@ -49,6 +49,8 @@ defmodule Mix.Tasks.Defdo.Saas.Doctor do
   use Mix.Task
 
   alias Defdo.Tasks.Saas.Audit
+  alias Defdo.Tasks.Saas.HexBaseline
+  alias Defdo.Tasks.Saas.Stack
 
   @switches [
     strict: :boolean,
@@ -69,6 +71,7 @@ defmodule Mix.Tasks.Defdo.Saas.Doctor do
         migrations_path: opts[:migrations_path] || Path.join(["priv", "repo", "migrations"]),
         config_path: opts[:config_path] || "config",
         deps: project_deps(),
+        hex_baseline: hex_baseline(),
         oauth: oauth_client(opts),
         oauth_role: oauth_role(opts)
       )
@@ -86,6 +89,16 @@ defmodule Mix.Tasks.Defdo.Saas.Doctor do
       nil -> []
       _module -> Mix.Project.config()[:deps] || []
     end
+  end
+
+  # Resolves the live "what does Hex currently publish" baseline once per
+  # run, for every stack package `check_deps/2` might have an opinion about.
+  # A failure here (offline, expired auth, no `defdo` organization key) never
+  # raises -- `HexBaseline.resolve/2` always returns `{:error, reason}`, and
+  # `Audit.check_deps/2` renders that as a NOTE rather than falling back to
+  # any hardcoded number.
+  defp hex_baseline do
+    Stack.select() |> Enum.map(& &1.name) |> HexBaseline.resolve_all()
   end
 
   defp oauth_client(opts) do

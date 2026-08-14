@@ -178,43 +178,76 @@ defmodule Defdo.Tasks.Saas.Stack do
   end
 
   @doc """
-  Checks an app's declared requirement for a stack dependency against the
-  version the stack expects.
+  Compares an app's declared requirement against the version Hex says is
+  *currently published*, in the direction that actually matters: can the
+  declared requirement still admit today's release?
 
-  Returns `:ok`, or `{:stale, expected}` when the declared requirement cannot
-  admit any version the stack targets. This is what catches a `~> 0.8.4` that
-  silently holds an app four minor versions back.
+  This replaced a version of this check that compared the declared
+  requirement against this module's own hardcoded `:requirement` field. That
+  field drifts the moment the estate ships a release this package's source
+  was not updated to know about, and when it drifts the comparison runs
+  backwards: an app newer than the stale baseline gets told it is "pinned
+  behind the stack" and offered a fix that would downgrade it. `current` must
+  come from a live read (see `Defdo.Tasks.Saas.HexBaseline`), never from
+  `fetch/1`.
 
-      iex> Defdo.Tasks.Saas.Stack.check_requirement(:defdo_tenant, "~> 0.12")
+  Returns:
+
+    * `:ok` — the requirement admits the current release.
+    * `{:behind, current}` — it does not, and the requirement's own floor is
+      at or below the current release, so the app really is pinned behind a
+      release it could otherwise take (a patch-level pin like `~> 0.13.0`
+      once Hex ships `0.15.0`, for instance).
+    * `{:ahead, floor}` — it does not, but the requirement's floor is *above*
+      the current release. The app is not behind -- if anything Hex is, or
+      the requirement names an unreleased version. Worth a note, never a
+      warning.
+    * `{:invalid, declared}` — the declared requirement does not parse.
+
+      iex> Defdo.Tasks.Saas.Stack.compare_to_baseline("~> 0.13", "0.13.0")
       :ok
 
-      iex> Defdo.Tasks.Saas.Stack.check_requirement(:defdo_tenant, "~> 0.10")
+      iex> Defdo.Tasks.Saas.Stack.compare_to_baseline("~> 0.12", "0.13.0")
       :ok
 
-      iex> Defdo.Tasks.Saas.Stack.check_requirement(:defdo_tenant, "~> 0.8.4")
-      {:stale, "~> 0.12"}
+      iex> Defdo.Tasks.Saas.Stack.compare_to_baseline("~> 0.13.0", "0.15.0")
+      {:behind, "0.15.0"}
 
-      iex> Defdo.Tasks.Saas.Stack.check_requirement(:not_a_defdo_package, "~> 1.0")
-      :ok
+      iex> Defdo.Tasks.Saas.Stack.compare_to_baseline("~> 2.0", "0.13.0")
+      {:ahead, "2.0.0"}
+
+      iex> Defdo.Tasks.Saas.Stack.compare_to_baseline("not a version", "0.13.0")
+      {:invalid, "not a version"}
   """
-  @spec check_requirement(atom(), String.t()) ::
-          :ok | {:stale, String.t()} | {:invalid, String.t()}
-  def check_requirement(name, declared) when is_atom(name) and is_binary(declared) do
-    case fetch(name) do
-      nil -> :ok
-      dep -> compare_requirement(dep, declared)
+  @spec compare_to_baseline(String.t(), String.t() | Version.t()) ::
+          :ok | {:behind, String.t()} | {:ahead, String.t()} | {:invalid, String.t()}
+  def compare_to_baseline(declared, current) when is_binary(declared) do
+    with {:ok, current_v} <- parse_version(current),
+         {:ok, parsed} <- Version.parse_requirement(declared) do
+      if Version.match?(current_v, parsed) do
+        :ok
+      else
+        behind_or_ahead(declared, current_v)
+      end
+    else
+      :error -> {:invalid, declared}
     end
   end
 
-  defp compare_requirement(dep, declared) do
-    # The floor of the stack's own requirement: "~> 0.12" -> "0.12.0". If the
-    # app's requirement cannot admit that version, the app is pinned behind the
-    # stack no matter how the requirement is spelled.
-    with {:ok, floor} <- requirement_floor(dep.requirement),
-         {:ok, parsed} <- Version.parse_requirement(declared) do
-      if Version.match?(floor, parsed), do: :ok, else: {:stale, dep.requirement}
-    else
-      :error -> {:invalid, declared}
+  defp parse_version(%Version{} = version), do: {:ok, version}
+  defp parse_version(version) when is_binary(version), do: Version.parse(version)
+
+  defp behind_or_ahead(declared, current_v) do
+    case requirement_floor(declared) do
+      {:ok, floor} ->
+        if Version.compare(floor, current_v) == :gt do
+          {:ahead, to_string(floor)}
+        else
+          {:behind, to_string(current_v)}
+        end
+
+      :error ->
+        {:invalid, declared}
     end
   end
 
