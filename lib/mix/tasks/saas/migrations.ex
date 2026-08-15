@@ -177,7 +177,11 @@ if match?({:module, _}, Code.ensure_compiled(Igniter.Mix.Task)) do
           )
 
         true ->
-          path = Path.join(migrations_path, MigratorChain.filename(target))
+          path =
+            Path.join(
+              migrations_path,
+              MigratorChain.filename(target, taken: MigratorChain.taken_stamps(migrations_path))
+            )
 
           igniter
           |> Igniter.create_new_file(path, MigratorChain.render(app_module, target, prefix))

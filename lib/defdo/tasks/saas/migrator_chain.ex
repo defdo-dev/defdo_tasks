@@ -500,24 +500,53 @@ defmodule Defdo.Tasks.Saas.MigratorChain do
   end
 
   @doc """
-  The migration filename for a wrapper, using the same timestamp-plus-suffix
-  scheme `defdo_tenant`'s installer uses so two generators run in the same
-  second cannot collide.
+  The migration filename for a wrapper.
+
+  The version is the standard 14-digit `ecto.gen.migration` timestamp. It used
+  to carry a 3-digit collision suffix, which silently produced 17-digit
+  versions — and Ecto orders migrations by integer version, so a 17-digit
+  version sorts after every legitimate 14-digit version that will ever be
+  generated. On a fresh database, every migration written after the wrapper
+  would run BEFORE it, forever.
+
+  Same-second collisions are avoided the way `ecto.gen.migration` semantics
+  allow: pass the stamps already present in the target directory as `taken:`
+  (see `taken_stamps/1`) and the timestamp bumps whole seconds until free.
   """
   @spec filename(pos_integer(), keyword()) :: String.t()
   def filename(version, opts \\ []) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
-    suffix = Keyword.get_lazy(opts, :suffix, &unique_suffix/0)
+    taken = MapSet.new(Keyword.get(opts, :taken, []))
     padded = String.pad_leading(to_string(version), 2, "0")
 
-    "#{Calendar.strftime(now, "%Y%m%d%H%M%S")}#{suffix}_upgrade_defdo_tenant_migrator_v#{padded}.exs"
+    "#{free_stamp(now, taken)}_upgrade_defdo_tenant_migrator_v#{padded}.exs"
   end
 
-  defp unique_suffix do
-    System.unique_integer([:positive])
-    |> rem(1000)
-    |> Integer.to_string()
-    |> String.pad_leading(3, "0")
+  defp free_stamp(now, taken) do
+    stamp = Calendar.strftime(now, "%Y%m%d%H%M%S")
+
+    if MapSet.member?(taken, stamp) do
+      free_stamp(DateTime.add(now, 1, :second), taken)
+    else
+      stamp
+    end
+  end
+
+  @doc """
+  The 14-digit version stamps already used in a migrations directory, for
+  `filename/2`'s `taken:` option. A missing directory reads as empty.
+  """
+  @spec taken_stamps(Path.t()) :: [String.t()]
+  def taken_stamps(migrations_path) do
+    case File.ls(migrations_path) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&Regex.match?(~r/^\d{14}_/, &1))
+        |> Enum.map(&String.slice(&1, 0, 14))
+
+      {:error, _} ->
+        []
+    end
   end
 
   @doc """

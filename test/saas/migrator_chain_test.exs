@@ -278,18 +278,40 @@ defmodule Defdo.Tasks.Saas.MigratorChainTest do
   end
 
   describe "filename/2" do
-    test "sorts after an earlier migration and names its version" do
+    test "uses the standard 14-digit ecto.gen.migration version" do
       now = ~U[2026-08-07 12:00:00Z]
-      name = MigratorChain.filename(4, now: now, suffix: "001")
+      name = MigratorChain.filename(4, now: now)
 
-      assert name == "20260807120000001_upgrade_defdo_tenant_migrator_v04.exs"
+      assert name == "20260807120000_upgrade_defdo_tenant_migrator_v04.exs"
     end
 
-    test "two wrappers generated in the same second do not collide" do
+    test "a same-second collision bumps whole seconds, never widens the version" do
       now = ~U[2026-08-07 12:00:00Z]
-      names = for _ <- 1..25, do: MigratorChain.filename(4, now: now)
+      taken = ["20260807120000", "20260807120001"]
+      name = MigratorChain.filename(4, now: now, taken: taken)
 
-      assert length(Enum.uniq(names)) == 25
+      assert name == "20260807120002_upgrade_defdo_tenant_migrator_v04.exs"
+      # 14 digits exactly: a wider version sorts after every future migration,
+      # which is the bug this replaced.
+      assert [stamp, _] = String.split(name, "_", parts: 2)
+      assert String.length(stamp) == 14
+    end
+  end
+
+  describe "taken_stamps/1" do
+    @tag :tmp_dir
+    test "reads the stamps in use and ignores non-migrations", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "20260101000000_a.exs"), "")
+      # A legacy 17-digit version can never collide with a 14-digit one
+      # (different integers), so it is not "taken".
+      File.write!(Path.join(tmp_dir, "20260814072708475_seventeen.exs"), "")
+      File.write!(Path.join(tmp_dir, "notes.md"), "")
+
+      assert MigratorChain.taken_stamps(tmp_dir) == ["20260101000000"]
+    end
+
+    test "a missing directory reads as empty" do
+      assert MigratorChain.taken_stamps("/nonexistent/priv/repo/migrations") == []
     end
   end
 

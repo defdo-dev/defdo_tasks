@@ -31,7 +31,7 @@ defmodule Mix.Tasks.Defdo.Saas.MigrationsTest do
       |> Igniter.compose_task("defdo.saas.migrations", ["--version", "4", "--prefix", "my_app"])
 
     assert [path] = migration_paths(igniter)
-    assert path =~ ~r/priv\/repo\/migrations\/\d{17}_upgrade_defdo_tenant_migrator_v04\.exs/
+    assert path =~ ~r/priv\/repo\/migrations\/\d{14}_upgrade_defdo_tenant_migrator_v04\.exs/
 
     source = migration_contents(igniter)
     assert source =~ "Defdo.Tenant.Migrator.up(version: 4, prefix: @prefix)"
