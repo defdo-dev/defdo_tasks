@@ -1,3 +1,62 @@
+# 0.4.1
+
+## Fixed
+
+- **`mix defdo.saas.doctor` reported `0 error(s), 0 warning(s)` while its
+  version-pin check never ran.** The baseline resolves each package's current
+  release by shelling out to `mix hex.info`, which authenticates with the Hex
+  **user session** — a different credential from the repo key `mix deps.get`
+  uses. With an expired session, every private package came back as
+  `No package with name X`, which reads like the package does not exist rather
+  than like a missing credential. That outcome became an `:info` finding, and
+  `:info` is printed with the label `ok`, so a check that could not run looked
+  exactly like a check that passed, and `--strict` never saw it.
+
+  Three changes:
+
+  * An unresolved baseline is now a **`:warning`**, not a note. `--strict`
+    exits non-zero on it, because a pipeline gating on `--strict` while the
+    check silently skips is gating on nothing.
+  * `HexBaseline.credential_env/1` forwards `HEX_API_KEY`, or `HEX_ORG_TOKEN`
+    when that is what the environment carries, into the `mix hex.info`
+    subprocess — so a caller that can already resolve its dependencies can also
+    run this check. No new configuration surface; unchanged behaviour when
+    neither variable is set; the value is never logged or rendered.
+  * The message names the real cause. An expired session says so and gives the
+    remedy (`export HEX_API_KEY="$HEX_ORG_TOKEN"`, or `mix hex.user auth`)
+    instead of implying the package is missing.
+
+  Measured on a real project: with credentials the doctor went from **7 notes
+  to 1** — the five skips became genuine, in-range comparisons that correctly
+  produce no finding. Without credentials, `--strict` now exits 1 where it
+  previously exited 0.
+
+- **`MigratorChain.filename/2` generated 17-digit migration versions** (#17).
+  A 3-digit collision suffix was appended to the timestamp, and since Ecto
+  orders migrations by integer version, a 17-digit version sorts after every
+  legitimate 14-digit version that will ever exist — on a fresh database every
+  migration written afterwards runs *before* the wrapper, permanently. Five
+  files across `defdo_shop`, `defdo_checkout` and `defdo_order_visor` shipped
+  with these stamps. Same-second collisions are now resolved the way the format
+  allows: the caller passes the stamps already in the migrations directory and
+  the timestamp bumps whole seconds until one is free. The integration test
+  asserting `\d{17}` had enshrined the bug; it now pins `\d{14}`.
+
+# 0.4.0
+
+Released without a changelog entry; recorded here after the fact.
+
+## Added
+
+- `mix defdo.ssl.setup` gained a **step-ca mode**, an on-ramp to an internal CA,
+  documented end to end including the config password file.
+
+## Fixed
+
+- The doctor's stack version baseline is resolved **from Hex** rather than from
+  a hardcoded number, so it stops going stale on its own.
+- step mode survives its own 24-hour leaf certificate instead of guessing.
+
 # 0.3.0
 
 ## Added

@@ -24,15 +24,32 @@ defmodule Defdo.Tasks.Saas.HexBaseline do
   private package that 404s because the caller cannot see it (Hex answers an
   unauthorized request for a private-org package the same way it answers a
   nonexistent one) -- none of these get to look like "the package doesn't
-  exist" or "the app is behind". The caller renders `{:error, _}` as a NOTE
-  that the baseline could not be resolved, never as a stale fact.
+  exist" or "the app is behind". The caller renders `{:error, _}` as a
+  WARNING that the version-pin check did not run, never as a stale fact and
+  never as a pass: an un-run check is unknown, and unknown must fail
+  `--strict` the same way a real problem does.
   """
 
   @organization "defdo"
   @default_timeout_ms 10_000
 
+  # `mix hex.info` authenticates with the Hex *user session* in
+  # `~/.hex/hex.config`, which is a different credential path from the repo
+  # key `mix deps.get` uses. A caller can therefore resolve every private dep
+  # fine while `hex.info` answers "No package with name X" for all of them.
+  # These are the variables an operator (or CI) already exports for
+  # `mix hex.organization auth defdo --key $HEX_ORG_TOKEN`; the first one
+  # present is forwarded to the subprocess as `HEX_API_KEY`, which Hex honours
+  # ahead of the expired session. Nothing is read from dotfiles and the value
+  # is never logged.
+  @credential_vars ["HEX_API_KEY", "HEX_ORG_TOKEN"]
+
   @typedoc "Why a package's current release could not be resolved."
-  @type reason :: :timeout | {:exit, non_neg_integer(), String.t()} | String.t()
+  @type reason ::
+          :timeout
+          | :expired_session
+          | {:exit, non_neg_integer(), String.t()}
+          | String.t()
 
   @type resolution :: {:ok, Version.t()} | {:error, reason()}
 
@@ -68,14 +85,19 @@ defmodule Defdo.Tasks.Saas.HexBaseline do
       iex> fetch = fn :offline_pkg -> {:error, :nxdomain} end
       iex> Defdo.Tasks.Saas.HexBaseline.resolve(:offline_pkg, fetch: fetch)
       {:error, :nxdomain}
+
+      iex> expired = "Your authentication session has expired and could not be refreshed.\\nNo package with name any_pkg\\n"
+      iex> fetch = fn :any_pkg -> {:ok, 1, expired} end
+      iex> Defdo.Tasks.Saas.HexBaseline.resolve(:any_pkg, fetch: fetch)
+      {:error, :expired_session}
   """
   @spec resolve(atom(), keyword()) :: resolution()
   def resolve(name, opts \\ []) when is_atom(name) do
-    fetch = Keyword.get(opts, :fetch, &default_fetch/1)
+    fetch = Keyword.get(opts, :fetch) || fn n -> default_fetch(n, opts) end
 
     case fetch.(name) do
       {:ok, 0, output} -> parse_latest(output)
-      {:ok, status, output} -> {:error, {:exit, status, first_line(output)}}
+      {:ok, status, output} -> {:error, exit_reason(status, output)}
       {:error, reason} -> {:error, reason}
     end
   rescue
@@ -90,11 +112,15 @@ defmodule Defdo.Tasks.Saas.HexBaseline do
   # a supervised Task and is abandoned (not killed -- the OS process may
   # linger) if it does not answer in time; a lingering `mix hex.info` is a far
   # smaller problem than a doctor invocation that never returns.
-  defp default_fetch(name) do
+  defp default_fetch(name, opts) do
+    cmd = Keyword.get(opts, :cmd, &System.cmd/3)
+    env = credential_env(Keyword.get(opts, :getenv, &System.get_env/1))
+
     task =
       Task.async(fn ->
-        System.cmd("mix", ["hex.info", to_string(name), "--organization", @organization],
-          stderr_to_stdout: true
+        cmd.("mix", ["hex.info", to_string(name), "--organization", @organization],
+          stderr_to_stdout: true,
+          env: env
         )
       end)
 
@@ -104,6 +130,42 @@ defmodule Defdo.Tasks.Saas.HexBaseline do
     end
   rescue
     exception -> {:error, Exception.message(exception)}
+  end
+
+  @doc """
+  The `env` this module forwards to `mix hex.info`, given a `System.get_env/1`-
+  shaped function.
+
+  Returns `[{"HEX_API_KEY", token}]` for the first of #{inspect(@credential_vars)}
+  the ambient environment defines with a non-blank value, and `[]` when it
+  defines none -- in which case `mix hex.info` falls back to whatever session
+  `~/.hex/hex.config` holds, exactly as before. The token itself is never
+  logged, rendered, or included in any finding.
+  """
+  @spec credential_env((String.t() -> String.t() | nil)) :: [{String.t(), String.t()}]
+  def credential_env(getenv \\ &System.get_env/1) when is_function(getenv, 1) do
+    @credential_vars
+    |> Enum.map(getenv)
+    |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
+    |> case do
+      nil -> []
+      token -> [{"HEX_API_KEY", String.trim(token)}]
+    end
+  end
+
+  # A nonzero `mix hex.info` is ambiguous by default: an unauthenticated
+  # caller gets "No package with name X" for every private package, published
+  # or not. When the output carries Hex's expired-session notice we know which
+  # one it was, and reporting it as a missing package would send the operator
+  # hunting for a package that is right there in their `mix.lock`.
+  defp exit_reason(status, output) do
+    stripped = strip_ansi(output)
+
+    if stripped =~ ~r/authentication session has expired/i do
+      :expired_session
+    else
+      {:exit, status, first_line(output)}
+    end
   end
 
   # `mix hex.info` often prints a colored warning line before the actual

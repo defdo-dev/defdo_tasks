@@ -8,6 +8,18 @@ defmodule Defdo.Tasks.Saas.AuditTest do
   defp checks(findings, check), do: Enum.filter(findings, &(&1.check == check))
   defp errors(findings), do: Enum.filter(findings, &(&1.severity == :error))
 
+  # A stack that is fully declared and correctly widened, so the only finding
+  # any of these tests can produce is the one about the baseline itself.
+  defp pinned_stack do
+    [
+      {:defdo_tenant, "~> 0.13", organization: :defdo},
+      {:defdo_tenant_plug, "~> 0.2"},
+      {:defdo_tenant_boundary, "~> 0.2"},
+      {:defdo_vault, "~> 0.10"},
+      {:defdo_payments, "~> 0.3"}
+    ]
+  end
+
   defp write_migration(dir, name, source) do
     File.mkdir_p!(dir)
     File.write!(Path.join(dir, name), source)
@@ -172,26 +184,56 @@ defmodule Defdo.Tasks.Saas.AuditTest do
       assert finding.message =~ "ahead of what Hex has published"
     end
 
-    test "an unresolved baseline entry is a note, and asserts nothing about the pin" do
-      deps = [
-        {:defdo_tenant, "~> 0.13", organization: :defdo},
-        {:defdo_tenant_plug, "~> 0.2"},
-        {:defdo_tenant_boundary, "~> 0.2"},
-        {:defdo_vault, "~> 0.10"},
-        {:defdo_payments, "~> 0.3"}
-      ]
-
+    test "an unresolved baseline asserts nothing about the pin, and fails --strict" do
+      # An un-run check is unknown, not ok. It must not render as a note next
+      # to genuine passes, and a pipeline gating on `--strict` must see it --
+      # otherwise `--strict` is gating on nothing whenever the baseline
+      # cannot be resolved.
+      deps = pinned_stack()
       hex_baseline = %{defdo_tenant: {:error, :timeout}}
 
       findings = Audit.check_deps(deps, hex_baseline)
 
-      refute Enum.any?(findings, &(&1.severity in [:warning, :error]))
+      assert [finding] = Enum.filter(findings, &(&1.check == :stack_deps))
+      assert finding.severity == :warning
+      assert finding.message =~ "defdo_tenant"
+      assert finding.message =~ "did NOT run"
+      # nothing is claimed about whether the pin is behind or ahead
+      refute finding.message =~ "pinned behind the stack"
+
+      assert Audit.exit_status(findings, strict: true) == 1
+      assert Audit.exit_status(findings) == 0
+    end
+
+    test "an expired Hex session names the session, not a missing package" do
+      deps = pinned_stack()
+      hex_baseline = %{defdo_tenant: {:error, :expired_session}}
 
       assert [finding] =
-               Enum.filter(findings, &(&1.check == :stack_deps and &1.severity == :info))
+               deps |> Audit.check_deps(hex_baseline) |> Enum.filter(&(&1.check == :stack_deps))
 
-      assert finding.message =~ "could not resolve"
-      assert finding.message =~ "defdo_tenant"
+      assert finding.severity == :warning
+      assert finding.message =~ "session has expired"
+      assert finding.message =~ "not a missing package"
+      assert finding.remedy =~ "HEX_API_KEY"
+
+      # and it is a different message from a package Hex genuinely does not have
+      no_such = %{defdo_tenant: {:error, {:exit, 1, "No package with name defdo_tenant"}}}
+
+      assert [other] =
+               deps |> Audit.check_deps(no_such) |> Enum.filter(&(&1.check == :stack_deps))
+
+      refute other.message =~ "session has expired"
+      assert other.message =~ "No package with name defdo_tenant"
+      assert other.message != finding.message
+    end
+
+    test "a resolved baseline that is in range produces no finding at all" do
+      deps = pinned_stack()
+      hex_baseline = %{defdo_tenant: {:ok, Version.parse!("0.13.2")}}
+
+      assert Audit.check_deps(deps, hex_baseline) == []
+      assert Audit.exit_status(Audit.check_deps(deps, hex_baseline), strict: true) == 0
     end
 
     test "a package absent from the baseline map is silently out of scope" do

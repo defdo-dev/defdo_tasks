@@ -22,7 +22,12 @@ defmodule Mix.Tasks.Defdo.Saas.Doctor do
 
     * **Stack dependencies.** Whether the core packages are declared, and
       whether any requirement is pinned so tightly it cannot admit the version
-      the stack targets.
+      the stack targets. This comparison needs the current release from the
+      private `defdo` Hex organization; when it cannot be resolved (expired
+      Hex session, offline, no organization key) the check reports a WARNING
+      saying it did not run, because an un-run check is unknown rather than
+      ok. Export `HEX_API_KEY="$HEX_ORG_TOKEN"` -- it is forwarded to
+      `mix hex.info` -- for a run that actually performs the comparison.
 
     * **`defdo_compiled_config.exs` drift.** Whether the repo flavour still
       returns `[type: :binary_id]` for migration keys.
@@ -43,7 +48,8 @@ defmodule Mix.Tasks.Defdo.Saas.Doctor do
   ## Exit status
 
   Exits 1 when any error is found, so it can gate a pipeline. `--strict` also
-  fails on warnings.
+  fails on warnings -- which includes a check that could not run at all, so a
+  `--strict` gate is never satisfied by silence.
   """
 
   use Mix.Task
@@ -95,8 +101,11 @@ defmodule Mix.Tasks.Defdo.Saas.Doctor do
   # run, for every stack package `check_deps/2` might have an opinion about.
   # A failure here (offline, expired auth, no `defdo` organization key) never
   # raises -- `HexBaseline.resolve/2` always returns `{:error, reason}`, and
-  # `Audit.check_deps/2` renders that as a NOTE rather than falling back to
-  # any hardcoded number.
+  # `Audit.check_deps/2` renders that as a WARNING (the check did not run;
+  # that is unknown, not ok) rather than falling back to any hardcoded number.
+  # `HexBaseline` forwards `HEX_API_KEY`/`HEX_ORG_TOKEN` from the ambient
+  # environment to `mix hex.info`, so a caller whose `mix deps.get` works can
+  # normally resolve the baseline too.
   defp hex_baseline do
     Stack.select() |> Enum.map(& &1.name) |> HexBaseline.resolve_all()
   end
