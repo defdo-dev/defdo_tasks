@@ -60,6 +60,28 @@ defmodule Defdo.Tasks.Saas.HexBaselineTest do
                HexBaseline.resolve(:defdo_tenant, fetch: fetch)
     end
 
+    test "an expired Hex session is reported as such, not as a missing package" do
+      # `mix hex.info` prints the expiry notice and *then* "No package with
+      # name X" -- for every private package, published or not. Reporting the
+      # last line alone sends the operator hunting for a package that is
+      # sitting in their own mix.lock.
+      output = """
+      \e[33mYour authentication session has expired and could not be refreshed. Continuing without credentials; requests for private resources will fail or prompt for authentication. Run `mix hex.user auth` to re-authenticate\e[0m
+      No package with name defdo_tenant
+      """
+
+      fetch = fn :defdo_tenant -> {:ok, 1, output} end
+
+      assert HexBaseline.resolve(:defdo_tenant, fetch: fetch) == {:error, :expired_session}
+    end
+
+    test "a genuine missing package stays distinguishable from an expired session" do
+      fetch = fn :nope -> {:ok, 1, "No package with name nope\n"} end
+
+      assert HexBaseline.resolve(:nope, fetch: fetch) ==
+               {:error, {:exit, 1, "No package with name nope"}}
+    end
+
     test "output with no recognizable release list is :error, not a crash" do
       fetch = fn :pkg -> {:ok, 0, "some unexpected output\n"} end
 
@@ -70,6 +92,78 @@ defmodule Defdo.Tasks.Saas.HexBaselineTest do
       fetch = fn :pkg -> raise "boom" end
 
       assert {:error, "boom"} = HexBaseline.resolve(:pkg, fetch: fetch)
+    end
+  end
+
+  describe "credential_env/1" do
+    # `mix hex.info` authenticates with the Hex user session, not the repo key
+    # `mix deps.get` uses, so a caller who can resolve every private dep still
+    # gets "No package with name X" once that session lapses. Forwarding the
+    # organization key the environment already carries is what lets the check
+    # actually run. Every assertion here is about the *presence* and shape of
+    # the credential -- the value is never asserted on, printed, or fixtured.
+    test "forwards HEX_API_KEY when the environment defines it" do
+      getenv = fn
+        "HEX_API_KEY" -> "hex-api-key-placeholder"
+        _other -> nil
+      end
+
+      assert [{"HEX_API_KEY", value}] = HexBaseline.credential_env(getenv)
+      assert byte_size(value) > 0
+    end
+
+    test "falls back to HEX_ORG_TOKEN, forwarded under the name Hex reads" do
+      getenv = fn
+        "HEX_ORG_TOKEN" -> "hex-org-token-placeholder"
+        _other -> nil
+      end
+
+      assert [{"HEX_API_KEY", value}] = HexBaseline.credential_env(getenv)
+      assert byte_size(value) > 0
+    end
+
+    test "an absent or blank credential forwards nothing, leaving Hex's own session in charge" do
+      assert HexBaseline.credential_env(fn _ -> nil end) == []
+      assert HexBaseline.credential_env(fn _ -> "   " end) == []
+    end
+
+    test "the real fetch passes the credential through to mix hex.info" do
+      test_pid = self()
+
+      cmd = fn "mix", args, opts ->
+        send(test_pid, {:cmd, args, opts})
+        {"Recent releases:\n  1.0.0 (2026-01-01)\n\n", 0}
+      end
+
+      getenv = fn
+        "HEX_ORG_TOKEN" -> "hex-org-token-placeholder"
+        _other -> nil
+      end
+
+      assert {:ok, _version} = HexBaseline.resolve(:defdo_tenant, cmd: cmd, getenv: getenv)
+
+      assert_receive {:cmd, args, opts}
+      assert "hex.info" in args
+      assert ["defdo"] = Enum.take(args, -1)
+
+      env = Keyword.fetch!(opts, :env)
+      assert [{"HEX_API_KEY", value}] = env
+      assert byte_size(value) > 0
+    end
+
+    test "with no credential in the environment the fetch passes an empty env" do
+      test_pid = self()
+
+      cmd = fn "mix", _args, opts ->
+        send(test_pid, {:cmd, opts})
+        {"Recent releases:\n  1.0.0 (2026-01-01)\n\n", 0}
+      end
+
+      assert {:ok, _version} =
+               HexBaseline.resolve(:defdo_tenant, cmd: cmd, getenv: fn _ -> nil end)
+
+      assert_receive {:cmd, opts}
+      assert Keyword.fetch!(opts, :env) == []
     end
   end
 

@@ -181,10 +181,12 @@ defmodule Defdo.Tasks.Saas.Audit do
   {:error, reason}`. A name absent from the map is treated as out of scope
   for this run and produces no version-pin finding at all -- only an entry
   that was actually attempted and failed produces the "could not resolve"
-  note. This is what keeps a network outage from ever turning into a false
+  warning. That finding is a warning rather than a note precisely because the
+  check did not run: it is unknown, not fine, and it must fail `--strict`.
+  This is what keeps a network outage from ever turning into a false
   "pinned behind the stack" warning: without a live number to compare
-  against, the check says nothing rather than falling back to a hardcoded
-  one.
+  against, the check reports that it could not run rather than falling back
+  to a hardcoded number.
   """
   @spec check_deps(list(), %{atom() => Defdo.Tasks.Saas.HexBaseline.resolution()}) ::
           [finding()]
@@ -226,13 +228,7 @@ defmodule Defdo.Tasks.Saas.Audit do
         []
 
       {:ok, {:error, reason}} ->
-        [
-          info(
-            :stack_deps,
-            "could not resolve the current `#{dep.name}` release from Hex " <>
-              "(#{format_reason(reason)}); skipping the version-pin check for this run."
-          )
-        ]
+        [unresolved_baseline_finding(dep, reason)]
 
       {:ok, {:ok, current}} ->
         case Stack.compare_to_baseline(requirement, current) do
@@ -270,6 +266,37 @@ defmodule Defdo.Tasks.Saas.Audit do
     end
   end
 
+  # An un-run check is not a passed check. Whatever stopped the baseline from
+  # resolving -- an expired session, a timeout, an unreachable registry -- the
+  # honest report is "unknown", and unknown is a WARNING so that a pipeline
+  # gating on `--strict` is gating on something. Rendering this as a NOTE
+  # printed it under the same `ok` label as a genuine pass and let
+  # `0 error(s), 0 warning(s)` be reported for a run in which the single most
+  # important check never executed.
+  defp unresolved_baseline_finding(dep, :expired_session) do
+    warning(
+      :stack_deps,
+      "the Hex authentication session has expired, so the current `#{dep.name}` release " <>
+        "could not be resolved and the version-pin check did NOT run. This is not a " <>
+        "missing package: `mix hex.info` answers every private package this way once the " <>
+        "session in `~/.hex/hex.config` lapses, while `mix deps.get` keeps working from " <>
+        "the stored repo key.",
+      "export HEX_API_KEY=\"$HEX_ORG_TOKEN\" (the defdo organization key) and re-run, " <>
+        "or refresh the session with `mix hex.user auth`"
+    )
+  end
+
+  defp unresolved_baseline_finding(dep, reason) do
+    warning(
+      :stack_deps,
+      "could not resolve the current `#{dep.name}` release from Hex " <>
+        "(#{format_reason(reason)}), so the version-pin check did NOT run. This is an " <>
+        "unknown, not a pass.",
+      "re-run with network access to Hex and the defdo organization key available " <>
+        "(export HEX_API_KEY=\"$HEX_ORG_TOKEN\")"
+    )
+  end
+
   defp widen_hint(version) do
     case Version.parse(version) do
       {:ok, %Version{major: major, minor: minor}} -> "~> #{major}.#{minor}"
@@ -278,6 +305,7 @@ defmodule Defdo.Tasks.Saas.Audit do
   end
 
   defp format_reason(:timeout), do: "timed out"
+  defp format_reason(:expired_session), do: "the Hex authentication session has expired"
   defp format_reason({:exit, status, message}), do: "exit #{status}: #{message}"
   defp format_reason(reason) when is_binary(reason), do: reason
   defp format_reason(reason), do: inspect(reason)
